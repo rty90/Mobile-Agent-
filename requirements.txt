@@ -1,1 +1,3 @@
-
+# The MVP is mostly stdlib-only.
+# Optional for model-backed planning:
+openai>=1.0.0
