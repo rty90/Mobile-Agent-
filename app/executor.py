@@ -44,7 +44,7 @@ class Executor(object):
         )
 
     def execute_plan(self, plan: ExecutionPlan) -> Dict[str, Any]:
-        self.state.start_task(plan.goal)
+        self.state.start_task(plan.goal, task_type=plan.task_type)
         context = self._context()
         step_results = []
 
@@ -56,24 +56,29 @@ class Executor(object):
 
         final_result = {
             "goal": plan.goal,
+            "task_type": plan.task_type,
+            "status": plan.status,
             "success": all(item["success"] for item in step_results) if step_results else False,
             "steps": step_results,
             "needs_replan": self.state.needs_replan,
             "state": self.state.to_dict(),
         }
+        if plan.message:
+            final_result["message"] = plan.message
         self._record_trajectory(final_result)
         return final_result
 
     def _execute_step(
         self, step: PlanStep, context: SkillContext, step_index: int
     ) -> Dict[str, Any]:
-        result = self._run_skill(step, context)
-        result = self._finalize_result(step, result, step_index)
+        resolved_step = PlanStep(step.skill, self._resolve_args(step.args))
+        result = self._run_skill(resolved_step, context)
+        result = self._finalize_result(resolved_step, result, step_index)
         if result["success"]:
             return result
 
-        if self._should_attempt_recovery(step, result):
-            recovered = self._attempt_recovery(step, context, step_index)
+        if self._should_attempt_recovery(resolved_step, result):
+            recovered = self._attempt_recovery(resolved_step, context, step_index)
             if recovered["success"]:
                 return recovered
 
@@ -90,6 +95,18 @@ class Executor(object):
                 "data": {},
             }
         return skill.execute(step.args, context)
+
+    def _resolve_args(self, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return value.format(**self.state.artifacts)
+            except KeyError:
+                return value
+        if isinstance(value, dict):
+            return dict((key, self._resolve_args(item)) for key, item in value.items())
+        if isinstance(value, list):
+            return [self._resolve_args(item) for item in value]
+        return value
 
     def _refresh_screen(self, prefix: str) -> Dict[str, Any]:
         summary = read_screen_summary(
@@ -133,6 +150,10 @@ class Executor(object):
             result["screenshot_path"] = screenshot_path
 
         data = result.get("data") or {}
+        artifacts = data.get("artifacts")
+        if isinstance(artifacts, dict):
+            for key, value in artifacts.items():
+                self.state.remember_artifact(key, value)
         page_name = self.state.current_page
         target_name = step.args.get("target") or step.args.get("expect_target")
         if isinstance(data.get("screen_summary"), dict):
@@ -221,9 +242,11 @@ class Executor(object):
         intent = self.state.current_task or final_result["goal"]
         steps_summary = " > ".join(step.get("action", "") for step in final_result.get("steps", []))
         confidence = 1.0 if final_result["success"] else 0.7
+        task_type = self.state.task_type or final_result.get("task_type", "unsupported")
 
         if final_result["success"]:
             self.memory.add_successful_trajectory(
+                task_type=task_type,
                 app=app_name,
                 intent=intent,
                 steps_summary=steps_summary,
@@ -232,6 +255,7 @@ class Executor(object):
             )
         else:
             self.memory.add_failure_pattern(
+                task_type=task_type,
                 app=app_name,
                 intent=intent,
                 steps_summary=steps_summary,

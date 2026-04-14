@@ -19,6 +19,8 @@ class DemoMessageConfig(object):
     contact_name: str
     phone_number: Optional[str]
     message_text: str
+    notes_package_name: str
+    calendar_package_name: str
     page_profiles: Dict[str, PageProfile]
 
 
@@ -34,6 +36,8 @@ def build_demo_message_config(
         contact_name=contact_name,
         phone_number=phone_number,
         message_text=message_text,
+        notes_package_name="com.google.android.keep",
+        calendar_package_name="com.google.android.calendar",
         page_profiles={
             "messages_home": PageProfile(
                 name="messages_home",
@@ -58,6 +62,30 @@ def build_demo_message_config(
                     "message_input": (0.42, 0.94),
                     "send": (0.92, 0.94),
                 },
+            ),
+            "keep_home": PageProfile(
+                name="keep_home",
+                keywords=("keep", "notes", "take a note", "new text note"),
+                fallback_targets={
+                    "new_note": (0.50, 0.93),
+                },
+            ),
+            "keep_editor": PageProfile(
+                name="keep_editor",
+                keywords=("editing", "title", "note", "pin", "remind me"),
+                fallback_targets={},
+            ),
+            "reminder_editor": PageProfile(
+                name="reminder_editor",
+                keywords=("save", "title", "event", "reminder"),
+                fallback_targets={
+                    "save": (0.91, 0.09),
+                },
+            ),
+            "reminder_saved": PageProfile(
+                name="reminder_saved",
+                keywords=("allinoneactivity", "agenda"),
+                fallback_targets={},
             ),
         },
     )

@@ -240,6 +240,25 @@ class ADBClient(object):
         if wait_time > 0:
             time.sleep(wait_time)
 
+    def start_calendar_event_intent(
+        self,
+        title: str,
+        begin_time_ms: Optional[int] = None,
+        package_name: str = "com.google.android.calendar",
+        wait_time: float = 1.0,
+    ) -> None:
+        escaped_title = title.replace("\\", "\\\\").replace('"', '\\"')
+        command = (
+            'am start -a android.intent.action.INSERT '
+            '-t vnd.android.cursor.item/event '
+            '-p "{0}" --es title "{1}"'.format(package_name, escaped_title)
+        )
+        if begin_time_ms is not None:
+            command += " --el beginTime {0}".format(int(begin_time_ms))
+        self.shell(command)
+        if wait_time > 0:
+            time.sleep(wait_time)
+
     def get_screen_size(self) -> Tuple[int, int]:
         output = self.shell("wm size")
         match = re.search(r"(\d+)x(\d+)", output)

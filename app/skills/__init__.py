@@ -4,6 +4,8 @@ from typing import Dict
 
 from app.skills.back import BackSkill
 from app.skills.confirm_action import ConfirmActionSkill
+from app.skills.extract_value import ExtractValueSkill
+from app.skills.open_calendar_event import OpenCalendarEventSkill
 from app.skills.open_app import OpenAppSkill
 from app.skills.open_message_thread import OpenMessageThreadSkill
 from app.skills.read_screen import ReadScreenSkill
@@ -18,12 +20,14 @@ def build_skill_registry() -> Dict[str, object]:
     skills = [
         OpenAppSkill(),
         OpenMessageThreadSkill(),
+        OpenCalendarEventSkill(),
         TapSkill(),
         SwipeSkill(),
         TypeTextSkill(),
         BackSkill(),
         WaitSkill(),
         ReadScreenSkill(),
+        ExtractValueSkill(),
         ConfirmActionSkill(),
         SearchInAppSkill(),
     ]

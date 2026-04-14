@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class AgentState(object):
     current_task: Optional[str] = None
+    task_type: Optional[str] = None
     current_app: Optional[str] = None
     current_page: Optional[str] = None
     last_action: Optional[str] = None
@@ -15,19 +16,24 @@ class AgentState(object):
     screen_summary: Dict[str, Any] = field(default_factory=dict)
     recent_screenshots: List[str] = field(default_factory=list)
     recent_actions: List[Dict[str, Any]] = field(default_factory=list)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
     needs_replan: bool = False
     risk_flag: bool = False
+    last_failure_reason: Optional[str] = None
 
-    def start_task(self, task_name: str) -> None:
+    def start_task(self, task_name: str, task_type: Optional[str] = None) -> None:
         self.current_task = task_name
+        self.task_type = task_type
         self.current_step_index = 0
         self.last_action = None
         self.last_action_success = None
         self.screen_summary = {}
         self.recent_actions = []
         self.recent_screenshots = []
+        self.artifacts = {}
         self.needs_replan = False
         self.risk_flag = False
+        self.last_failure_reason = None
 
     def update_screen_summary(self, summary: Dict[str, Any]) -> None:
         self.screen_summary = summary or {}
@@ -58,6 +64,14 @@ class AgentState(object):
         self.recent_actions.append(event)
         self.recent_actions = self.recent_actions[-5:]
         self.needs_replan = not success
+        self.last_failure_reason = detail if not success else None
+
+    def remember_artifact(self, key: str, value: Any) -> None:
+        self.artifacts[key] = value
+
+    def recent_failure_count(self, limit: int = 3) -> int:
+        recent = self.recent_actions[-limit:]
+        return len([item for item in recent if not item.get("success")])
 
     def add_screenshot(self, screenshot_path: str) -> None:
         self.recent_screenshots.append(screenshot_path)

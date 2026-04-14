@@ -34,6 +34,7 @@ class SQLiteMemory(object):
                 """
                 CREATE TABLE IF NOT EXISTS successful_trajectories (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT,
                     app TEXT,
                     intent TEXT NOT NULL,
                     steps_summary TEXT NOT NULL,
@@ -48,6 +49,7 @@ class SQLiteMemory(object):
                 """
                 CREATE TABLE IF NOT EXISTS failure_patterns (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT,
                     app TEXT,
                     intent TEXT NOT NULL,
                     steps_summary TEXT NOT NULL,
@@ -70,7 +72,25 @@ class SQLiteMemory(object):
                 )
                 """
             )
+            self._ensure_column(conn, "successful_trajectories", "task_type", "TEXT")
+            self._ensure_column(conn, "failure_patterns", "task_type", "TEXT")
             conn.commit()
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_type: str,
+    ) -> None:
+        rows = conn.execute("PRAGMA table_info({0})".format(table_name)).fetchall()
+        existing = [row[1] for row in rows]
+        if column_name not in existing:
+            conn.execute(
+                "ALTER TABLE {0} ADD COLUMN {1} {2}".format(
+                    table_name, column_name, column_type
+                )
+            )
 
     def save_user_preference(
         self, preference_key: str, preference_value: str, confidence: float = 1.0
@@ -92,6 +112,7 @@ class SQLiteMemory(object):
 
     def add_successful_trajectory(
         self,
+        task_type: str,
         app: str,
         intent: str,
         steps_summary: str,
@@ -105,26 +126,31 @@ class SQLiteMemory(object):
             conn.execute(
                 """
                 INSERT INTO successful_trajectories
-                (app, intent, steps_summary, success, timestamp, confidence, verified)
-                VALUES (?, ?, ?, 1, ?, ?, 1)
+                (task_type, app, intent, steps_summary, success, timestamp, confidence, verified)
+                VALUES (?, ?, ?, ?, 1, ?, ?, 1)
                 """,
-                (app, intent, steps_summary, timestamp, confidence),
+                (task_type, app, intent, steps_summary, timestamp, confidence),
             )
             conn.commit()
         return True
 
     def add_failure_pattern(
-        self, app: str, intent: str, steps_summary: str, confidence: float
+        self,
+        task_type: str,
+        app: str,
+        intent: str,
+        steps_summary: str,
+        confidence: float,
     ) -> None:
         timestamp = datetime.utcnow().isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO failure_patterns
-                (app, intent, steps_summary, success, timestamp, confidence)
-                VALUES (?, ?, ?, 0, ?, ?)
+                (task_type, app, intent, steps_summary, success, timestamp, confidence)
+                VALUES (?, ?, ?, ?, 0, ?, ?)
                 """,
-                (app, intent, steps_summary, timestamp, confidence),
+                (task_type, app, intent, steps_summary, timestamp, confidence),
             )
             conn.commit()
 
@@ -197,6 +223,37 @@ class SQLiteMemory(object):
             "last_seen_timestamp": row[4],
         }
 
+    def get_relevant_contacts(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        normalized = (query or "").strip().lower()
+        if not normalized:
+            return self.list_contacts(limit=limit)
+
+        wildcard = "%{0}%".format(normalized.replace(" ", "%"))
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT contact_name, phone_number, source_app, confidence, last_seen_timestamp
+                FROM known_contacts
+                WHERE lower(contact_name) LIKE ?
+                   OR replace(lower(contact_name), ' ', '') LIKE replace(?, ' ', '')
+                   OR lower(phone_number) LIKE ?
+                ORDER BY confidence DESC, last_seen_timestamp DESC
+                LIMIT ?
+                """,
+                (wildcard, wildcard, wildcard, limit),
+            )
+            rows = cursor.fetchall()
+        return [
+            {
+                "contact_name": row[0],
+                "phone_number": row[1],
+                "source_app": row[2],
+                "confidence": row[3],
+                "last_seen_timestamp": row[4],
+            }
+            for row in rows
+        ]
+
     def get_best_contact(self, prefer_ascii: bool = True) -> Optional[Dict[str, Any]]:
         contacts = self.list_contacts(limit=20)
         if prefer_ascii:
@@ -204,6 +261,74 @@ class SQLiteMemory(object):
                 if all(ord(char) < 128 for char in contact["contact_name"]):
                     return contact
         return contacts[0] if contacts else None
+
+    def get_relevant_successes(
+        self,
+        task_type: str,
+        app: Optional[str] = None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        return self._get_relevant_rows(
+            table_name="successful_trajectories",
+            task_type=task_type,
+            app=app,
+            limit=limit,
+            verified_only=True,
+        )
+
+    def get_relevant_failures(
+        self,
+        task_type: str,
+        app: Optional[str] = None,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        return self._get_relevant_rows(
+            table_name="failure_patterns",
+            task_type=task_type,
+            app=app,
+            limit=limit,
+            verified_only=False,
+        )
+
+    def _get_relevant_rows(
+        self,
+        table_name: str,
+        task_type: str,
+        app: Optional[str],
+        limit: int,
+        verified_only: bool,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["task_type = ?"]
+        params: List[Any] = [task_type]
+        if app:
+            clauses.append("(app = ? OR app IS NULL OR app = '')")
+            params.append(app)
+        if verified_only and table_name == "successful_trajectories":
+            clauses.append("verified = 1")
+        query = """
+            SELECT task_type, app, intent, steps_summary, success, timestamp, confidence
+            FROM {0}
+            WHERE {1}
+            ORDER BY confidence DESC, timestamp DESC
+            LIMIT ?
+        """.format(table_name, " AND ".join(clauses))
+        params.append(limit)
+
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "task_type": row[0],
+                "app": row[1],
+                "intent": row[2],
+                "steps_summary": row[3],
+                "success": bool(row[4]),
+                "timestamp": row[5],
+                "confidence": row[6],
+                "source": "success" if table_name == "successful_trajectories" else "failure",
+            }
+            for row in rows
+        ]
 
     def get_relevant_memories(
         self, intent: str, app: Optional[str] = None, limit: int = 3
@@ -216,11 +341,11 @@ class SQLiteMemory(object):
             params.append(app)
 
         query = """
-            SELECT app, intent, steps_summary, success, timestamp, confidence, 'success' AS source
+            SELECT task_type, app, intent, steps_summary, success, timestamp, confidence, 'success' AS source
             FROM successful_trajectories
             WHERE verified = 1 AND (intent LIKE ? {0})
             UNION ALL
-            SELECT app, intent, steps_summary, success, timestamp, confidence, 'failure' AS source
+            SELECT task_type, app, intent, steps_summary, success, timestamp, confidence, 'failure' AS source
             FROM failure_patterns
             WHERE intent LIKE ? {0}
             ORDER BY confidence DESC, timestamp DESC
@@ -236,13 +361,14 @@ class SQLiteMemory(object):
         for row in rows:
             memories.append(
                 {
-                    "app": row[0],
-                    "intent": row[1],
-                    "steps_summary": row[2],
-                    "success": bool(row[3]),
-                    "timestamp": row[4],
-                    "confidence": row[5],
-                    "source": row[6],
+                    "task_type": row[0],
+                    "app": row[1],
+                    "intent": row[2],
+                    "steps_summary": row[3],
+                    "success": bool(row[4]),
+                    "timestamp": row[5],
+                    "confidence": row[6],
+                    "source": row[7],
                 }
             )
         return memories
