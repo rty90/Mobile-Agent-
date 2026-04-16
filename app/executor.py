@@ -8,6 +8,7 @@ from app.skills.base import SkillContext
 from app.skills.read_screen import read_screen_summary
 from app.skills.targeting import find_semantic_target
 from app.state import AgentState
+from app.task_types import TASK_GUIDED_UI_TASK
 from app.utils.logger import log_action
 from app.utils.screenshot import ScreenshotManager
 
@@ -23,6 +24,8 @@ class Executor(object):
         screenshot_manager: ScreenshotManager,
         skill_registry: Mapping[str, Any],
         memory: Optional[SQLiteMemory] = None,
+        context_builder: Any = None,
+        page_reasoner: Any = None,
         runtime_config: Any = None,
     ) -> None:
         self.adb = adb
@@ -31,7 +34,18 @@ class Executor(object):
         self.screenshot_manager = screenshot_manager
         self.skill_registry = dict(skill_registry)
         self.memory = memory
+        self.context_builder = context_builder
+        self.page_reasoner = page_reasoner
         self.runtime_config = runtime_config
+        self._interactive_allowed_skills = {
+            "open_app",
+            "tap",
+            "swipe",
+            "type_text",
+            "back",
+            "wait",
+            "search_in_app",
+        }
 
     def _context(self) -> SkillContext:
         return SkillContext(
@@ -40,11 +54,23 @@ class Executor(object):
             logger=self.logger,
             screenshot_manager=self.screenshot_manager,
             registry=self.skill_registry,
+            memory=self.memory,
+            context_builder=self.context_builder,
+            page_reasoner=self.page_reasoner,
             runtime_config=self.runtime_config,
         )
 
-    def execute_plan(self, plan: ExecutionPlan) -> Dict[str, Any]:
-        self.state.start_task(plan.goal, task_type=plan.task_type)
+    def execute_plan(
+        self,
+        plan: ExecutionPlan,
+        agent_mode: str = "bounded",
+        max_steps: int = 3,
+    ) -> Dict[str, Any]:
+        self.state.start_task(
+            plan.goal,
+            task_type=plan.task_type,
+            risk_flag=self.state.risk_flag,
+        )
         context = self._context()
         step_results = []
 
@@ -54,6 +80,19 @@ class Executor(object):
             if not result["success"]:
                 break
 
+        if (
+            all(item["success"] for item in step_results)
+            and agent_mode == "interactive"
+            and plan.task_type == TASK_GUIDED_UI_TASK
+        ):
+            interactive_results = self._run_interactive_loop(
+                plan=plan,
+                context=context,
+                start_index=len(step_results) + 1,
+                max_steps=max_steps,
+            )
+            step_results.extend(interactive_results)
+
         final_result = {
             "goal": plan.goal,
             "task_type": plan.task_type,
@@ -62,6 +101,7 @@ class Executor(object):
             "steps": step_results,
             "needs_replan": self.state.needs_replan,
             "state": self.state.to_dict(),
+            "agent_mode": agent_mode,
         }
         if plan.message:
             final_result["message"] = plan.message
@@ -72,6 +112,16 @@ class Executor(object):
         self, step: PlanStep, context: SkillContext, step_index: int
     ) -> Dict[str, Any]:
         resolved_step = PlanStep(step.skill, self._resolve_args(step.args))
+        skip_if_page = resolved_step.args.get("skip_if_page")
+        if skip_if_page and self.state.current_page == skip_if_page:
+            skipped = {
+                "success": True,
+                "action": resolved_step.skill,
+                "detail": "Skipped because page is already {0}.".format(skip_if_page),
+                "screenshot_path": None,
+                "data": {"skipped": True},
+            }
+            return self._finalize_result(resolved_step, skipped, step_index)
         result = self._run_skill(resolved_step, context)
         result = self._finalize_result(resolved_step, result, step_index)
         if result["success"]:
@@ -186,6 +236,87 @@ class Executor(object):
             return False
         detail = str(result.get("detail", "")).lower()
         return "unable to find" in detail or "expected" in detail
+
+    def _run_interactive_loop(
+        self,
+        plan: ExecutionPlan,
+        context: SkillContext,
+        start_index: int,
+        max_steps: int,
+    ) -> list:
+        results = []
+        next_step_index = start_index
+        rounds_completed = 0
+
+        while rounds_completed < max_steps:
+            reasoning = self.state.artifacts.get("last_page_reasoning") or {}
+            next_action = reasoning.get("next_action")
+            if not next_action:
+                break
+            validation_error = self._validate_interactive_action(next_action, reasoning)
+            if validation_error:
+                failure = {
+                    "success": False,
+                    "action": "interactive_action",
+                    "detail": validation_error,
+                    "screenshot_path": None,
+                    "data": {"page_reasoning": reasoning},
+                }
+                results.append(
+                    self._finalize_result(
+                        PlanStep("interactive_action", {}),
+                        failure,
+                        next_step_index,
+                    )
+                )
+                break
+
+            action_step = PlanStep(str(next_action["skill"]), dict(next_action.get("args") or {}))
+            action_result = self._execute_step(action_step, context, next_step_index)
+            results.append(action_result)
+            next_step_index += 1
+            if not action_result["success"]:
+                break
+
+            read_step = PlanStep("read_screen", {"prefix": "interactive_round_{0}".format(rounds_completed + 1)})
+            read_result = self._execute_step(read_step, context, next_step_index)
+            results.append(read_result)
+            next_step_index += 1
+            if not read_result["success"]:
+                break
+
+            reason_step = PlanStep(
+                "reason_about_page",
+                {
+                    "goal": plan.goal,
+                    "task_type": plan.task_type,
+                },
+            )
+            reason_result = self._execute_step(reason_step, context, next_step_index)
+            results.append(reason_result)
+            next_step_index += 1
+            if not reason_result["success"]:
+                break
+
+            rounds_completed += 1
+
+        return results
+
+    def _validate_interactive_action(
+        self,
+        next_action: Dict[str, Any],
+        reasoning: Dict[str, Any],
+    ) -> Optional[str]:
+        skill_name = str(next_action.get("skill") or "").strip()
+        if not skill_name:
+            return "Interactive next_action is missing a skill."
+        if skill_name not in self._interactive_allowed_skills:
+            return "Interactive action is not allowed: {0}".format(skill_name)
+        if not isinstance(next_action.get("args") or {}, dict):
+            return "Interactive action args must be an object."
+        if reasoning.get("requires_confirmation"):
+            return "Interactive action requires manual confirmation."
+        return None
 
     def _attempt_recovery(
         self,

@@ -21,7 +21,12 @@ class AgentState(object):
     risk_flag: bool = False
     last_failure_reason: Optional[str] = None
 
-    def start_task(self, task_name: str, task_type: Optional[str] = None) -> None:
+    def start_task(
+        self,
+        task_name: str,
+        task_type: Optional[str] = None,
+        risk_flag: bool = False,
+    ) -> None:
         self.current_task = task_name
         self.task_type = task_type
         self.current_step_index = 0
@@ -32,7 +37,7 @@ class AgentState(object):
         self.recent_screenshots = []
         self.artifacts = {}
         self.needs_replan = False
-        self.risk_flag = False
+        self.risk_flag = risk_flag
         self.last_failure_reason = None
 
     def update_screen_summary(self, summary: Dict[str, Any]) -> None:

@@ -42,9 +42,12 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(plan.task_type, "extract_and_copy")
         self.assertEqual(
-            [step.skill for step in plan.steps[:3]],
-            ["read_screen", "extract_value", "open_app"],
+            [step.skill for step in plan.steps[:5]],
+            ["read_screen", "extract_value", "open_app", "read_screen", "tap"],
         )
+        self.assertEqual(plan.steps[2].args["expect_page"], "keep_home")
+        self.assertEqual(plan.steps[5].args["target"], "text")
+        self.assertEqual(plan.steps[5].args["expect_page"], "keep_editor")
 
     def test_rule_planner_create_reminder_flow_uses_calendar_editor(self):
         planner = self._build_planner()
@@ -55,6 +58,23 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan.steps[0].skill, "open_calendar_event")
         self.assertEqual(plan.steps[2].skill, "confirm_action")
 
+    def test_rule_planner_read_current_screen_flow_is_reasoning_only(self):
+        planner = self._build_planner()
+        state = AgentState()
+        plan = planner.create_plan("read the current screen and summarize it", state)
+
+        self.assertEqual(plan.task_type, "read_current_screen")
+        self.assertEqual([step.skill for step in plan.steps], ["read_screen", "reason_about_page"])
+
+    def test_rule_planner_guided_ui_task_opens_app_then_reasons(self):
+        planner = self._build_planner()
+        state = AgentState()
+        plan = planner.create_plan("open keep and tell me what is on the current page", state)
+
+        self.assertEqual(plan.task_type, "guided_ui_task")
+        self.assertEqual(plan.steps[0].skill, "open_app")
+        self.assertEqual(plan.steps[-1].skill, "reason_about_page")
+
     def test_rule_planner_marks_unsupported_tasks(self):
         planner = self._build_planner()
         state = AgentState()
@@ -64,7 +84,21 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan.task_type, "unsupported")
         self.assertEqual(plan.steps, [])
 
+    def test_rule_planner_uses_remembered_contact_context(self):
+        planner = self._build_planner()
+        state = AgentState()
+        context = {
+            "remembered_contacts": [
+                {
+                    "contact_name": "Dave Zhu",
+                    "phone_number": "+18059577464",
+                }
+            ]
+        }
+        plan = planner.rule_planner.plan('send message to Dave Zhu "hello"', context)
+
+        self.assertEqual(plan.steps[0].args["phone_number"], "+18059577464")
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -8,6 +8,7 @@ from typing import Dict, Optional, Tuple
 class PageProfile(object):
     name: str
     keywords: Tuple[str, ...]
+    app_hints: Tuple[str, ...] = field(default_factory=tuple)
     fallback_targets: Dict[str, Tuple[float, float]] = field(default_factory=dict)
 
 
@@ -41,7 +42,8 @@ def build_demo_message_config(
         page_profiles={
             "messages_home": PageProfile(
                 name="messages_home",
-                keywords=("messages", "search", "start chat", "message"),
+                keywords=("messages", "start chat", "new conversation", "new chat"),
+                app_hints=("com.google.android.apps.messaging",),
                 fallback_targets={
                     "search": (0.90, 0.10),
                     "new_chat": (0.90, 0.90),
@@ -50,6 +52,7 @@ def build_demo_message_config(
             "messages_search": PageProfile(
                 name="messages_search",
                 keywords=("search", "conversation", "name", "phone number", "email"),
+                app_hints=("com.google.android.apps.messaging",),
                 fallback_targets={
                     "search": (0.50, 0.12),
                     "contact_result": (0.50, 0.26),
@@ -58,6 +61,7 @@ def build_demo_message_config(
             "message_thread": PageProfile(
                 name="message_thread",
                 keywords=("send", "message", "sms", "mms", "go back", "clear text"),
+                app_hints=("com.google.android.apps.messaging",),
                 fallback_targets={
                     "message_input": (0.42, 0.94),
                     "send": (0.92, 0.94),
@@ -65,26 +69,37 @@ def build_demo_message_config(
             ),
             "keep_home": PageProfile(
                 name="keep_home",
-                keywords=("keep", "notes", "take a note", "new text note"),
+                keywords=("keep", "notes", "take a note", "create a note", "new text note"),
+                app_hints=("com.google.android.keep",),
                 fallback_targets={
-                    "new_note": (0.50, 0.93),
+                    "new_note": (0.90, 0.93),
+                    "new_text_note": (0.85, 0.86),
                 },
             ),
             "keep_editor": PageProfile(
                 name="keep_editor",
                 keywords=("editing", "title", "note", "pin", "remind me"),
+                app_hints=("com.google.android.keep",),
                 fallback_targets={},
             ),
             "reminder_editor": PageProfile(
                 name="reminder_editor",
-                keywords=("save", "title", "event", "reminder"),
+                keywords=("save", "title", "event", "task", "birthday", "all-day"),
+                app_hints=("com.google.android.calendar",),
                 fallback_targets={
                     "save": (0.91, 0.09),
                 },
             ),
             "reminder_saved": PageProfile(
                 name="reminder_saved",
-                keywords=("allinoneactivity", "agenda"),
+                keywords=(
+                    "jump to today",
+                    "open tasks",
+                    "creation menu",
+                    "open schedule view",
+                    "signed in as",
+                ),
+                app_hints=("com.google.android.calendar",),
                 fallback_targets={},
             ),
         },

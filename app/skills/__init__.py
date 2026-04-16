@@ -9,6 +9,7 @@ from app.skills.open_calendar_event import OpenCalendarEventSkill
 from app.skills.open_app import OpenAppSkill
 from app.skills.open_message_thread import OpenMessageThreadSkill
 from app.skills.read_screen import ReadScreenSkill
+from app.skills.reason_about_page import ReasonAboutPageSkill
 from app.skills.search_in_app import SearchInAppSkill
 from app.skills.swipe import SwipeSkill
 from app.skills.tap import TapSkill
@@ -27,6 +28,7 @@ def build_skill_registry() -> Dict[str, object]:
         BackSkill(),
         WaitSkill(),
         ReadScreenSkill(),
+        ReasonAboutPageSkill(),
         ExtractValueSkill(),
         ConfirmActionSkill(),
         SearchInAppSkill(),

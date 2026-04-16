@@ -12,12 +12,16 @@ from app.state import AgentState
 from app.task_types import (
     TASK_CREATE_REMINDER,
     TASK_EXTRACT_AND_COPY,
+    TASK_GUIDED_UI_TASK,
+    TASK_READ_CURRENT_SCREEN,
     TASK_SEND_MESSAGE,
     TASK_UNSUPPORTED,
     detect_task_type,
     extract_contact_query,
     extract_message_body,
     parse_extract_task,
+    parse_guided_ui_task,
+    parse_screen_read_task,
 )
 
 
@@ -85,6 +89,10 @@ class RuleBasedPlanner(object):
             return self._plan_extract_and_copy(task_text, context)
         if task_type == TASK_CREATE_REMINDER:
             return self._plan_create_reminder(task_text, context)
+        if task_type == TASK_READ_CURRENT_SCREEN:
+            return self._plan_read_current_screen(task_text)
+        if task_type == TASK_GUIDED_UI_TASK:
+            return self._plan_guided_ui_task(task_text)
         return ExecutionPlan(
             goal=task_text,
             task_type=TASK_UNSUPPORTED,
@@ -103,7 +111,8 @@ class RuleBasedPlanner(object):
 
     def _plan_send_message(self, task_text: str, context: Dict[str, Any]) -> ExecutionPlan:
         contact_query = extract_contact_query(task_text)
-        known_contact = context.get("known_contact") or {}
+        remembered_contacts = context.get("remembered_contacts") or []
+        known_contact = context.get("known_contact") or (remembered_contacts[0] if remembered_contacts else {})
         contact_name = contact_query or known_contact.get("contact_name") or self.demo_config.contact_name
         message_text = extract_message_body(task_text) or self.demo_config.message_text
         phone_number = known_contact.get("phone_number") or self.demo_config.phone_number
@@ -198,8 +207,7 @@ class RuleBasedPlanner(object):
 
     def _plan_extract_and_copy(self, task_text: str, context: Dict[str, Any]) -> ExecutionPlan:
         parse_result = parse_extract_task(task_text)
-        target_app = parse_result["target_app"]
-        package_name = self.APP_ALIASES.get(target_app, self.demo_config.notes_package_name)
+        package_name = parse_result["target_package"]
         return ExecutionPlan(
             goal=task_text,
             task_type=TASK_EXTRACT_AND_COPY,
@@ -216,25 +224,37 @@ class RuleBasedPlanner(object):
                     "open_app",
                     {
                         "package_name": package_name,
-                        "expect_page": "keep_home",
-                        "expect_target": "take a note",
+                        "expect_page": parse_result["target_home_page"],
+                        "expect_target": parse_result["target_entry_target"],
                     },
                 ),
-                PlanStep("read_screen", {"prefix": "keep_home"}),
+                PlanStep("read_screen", {"prefix": parse_result["target_home_page"]}),
                 PlanStep(
                     "tap",
                     {
-                        "target": "take a note",
-                        "target_key": "new_note",
+                        "target": parse_result["target_entry_target"],
+                        "target_key": parse_result["target_entry_key"],
+                        "prefer_fallback": True,
+                    },
+                ),
+                PlanStep(
+                    "tap",
+                    {
+                        "target": "text",
+                        "target_key": "new_text_note",
+                        "skip_if_page": parse_result["target_editor_page"],
+                        "expect_page": parse_result["target_editor_page"],
+                        "prefer_fallback": True,
                     },
                 ),
                 PlanStep(
                     "type_text",
                     {
                         "text": "{extracted_value}",
+                        "expect_page": parse_result["target_editor_page"],
                     },
                 ),
-                PlanStep("read_screen", {"prefix": "keep_editor"}),
+                PlanStep("read_screen", {"prefix": parse_result["target_editor_page"]}),
             ],
         )
 
@@ -268,6 +288,54 @@ class RuleBasedPlanner(object):
             ],
         )
 
+    def _plan_read_current_screen(self, task_text: str) -> ExecutionPlan:
+        read_task = parse_screen_read_task(task_text)
+        return ExecutionPlan(
+            goal=task_text,
+            task_type=TASK_READ_CURRENT_SCREEN,
+            steps=[
+                PlanStep("read_screen", {"prefix": "read_current_screen"}),
+                PlanStep(
+                    "reason_about_page",
+                    {
+                        "goal": task_text,
+                        "task_type": TASK_READ_CURRENT_SCREEN,
+                        "field_hint": read_task.get("field_hint"),
+                    },
+                ),
+            ],
+        )
+
+    def _plan_guided_ui_task(self, task_text: str) -> ExecutionPlan:
+        guided_task = parse_guided_ui_task(task_text)
+        steps = []
+        if guided_task.get("target_package"):
+            steps.append(
+                PlanStep(
+                    "open_app",
+                    {
+                        "package_name": guided_task["target_package"],
+                    },
+                )
+            )
+        steps.extend(
+            [
+                PlanStep("read_screen", {"prefix": "guided_ui_task"}),
+                PlanStep(
+                    "reason_about_page",
+                    {
+                        "goal": task_text,
+                        "task_type": TASK_GUIDED_UI_TASK,
+                    },
+                ),
+            ]
+        )
+        return ExecutionPlan(
+            goal=task_text,
+            task_type=TASK_GUIDED_UI_TASK,
+            steps=steps,
+        )
+
 
 class OpenAIPlanner(object):
     """Optional planner path that still produces the same plan structure."""
@@ -275,10 +343,10 @@ class OpenAIPlanner(object):
     SYSTEM_PROMPT = (
         "You are planning bounded Android GUI tasks. "
         "Return strict JSON only with keys goal, task_type, status, message, and steps. "
-        "Allowed task_type values: send_message, extract_and_copy, create_reminder, unsupported. "
+        "Allowed task_type values: send_message, extract_and_copy, create_reminder, read_current_screen, guided_ui_task, unsupported. "
         "Each step must use one allowed skill from: "
         "open_app, open_message_thread, open_calendar_event, tap, swipe, type_text, back, wait, "
-        "read_screen, extract_value, confirm_action, search_in_app."
+        "read_screen, extract_value, confirm_action, search_in_app, reason_about_page."
     )
 
     def __init__(self, model: Optional[str] = None) -> None:
@@ -362,4 +430,3 @@ class TaskPlanner(object):
             except PlannerError:
                 return self.rule_planner.plan(task_text, context, task_type_override=task_type)
         return self.rule_planner.plan(task_text, context, task_type_override=task_type)
-

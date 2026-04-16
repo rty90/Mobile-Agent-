@@ -19,6 +19,9 @@ class SkillContext(object):
     logger: Any
     screenshot_manager: ScreenshotManager
     registry: MutableMapping[str, "BaseSkill"]
+    memory: Any = None
+    context_builder: Any = None
+    page_reasoner: Any = None
     runtime_config: Any = None
 
 

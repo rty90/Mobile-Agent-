@@ -225,6 +225,10 @@ class ADBClient(object):
     def force_stop_app(self, package_name: str) -> None:
         self.shell("am force-stop {0}".format(package_name), check=False)
 
+    def is_package_installed(self, package_name: str) -> bool:
+        output = self.shell("pm path {0}".format(package_name), check=False)
+        return output.strip().startswith("package:")
+
     def start_sendto_intent(
         self,
         phone_number: str,
@@ -278,8 +282,47 @@ class ADBClient(object):
     def dump_ui_xml(self, local_path: str) -> Path:
         target = Path(local_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        remote_path = "/sdcard/window_dump.xml"
-        self.shell("uiautomator dump --compressed {0}".format(remote_path))
-        self.run("pull", remote_path, str(target))
-        self.shell("rm {0}".format(remote_path), check=False)
-        return target
+        last_error = None
+        attempts = (
+            ("/sdcard/window_dump.xml", ("--compressed",), 0.6),
+            ("/sdcard/window_dump.xml", tuple(), 1.0),
+            ("/data/local/tmp/window_dump.xml", ("--compressed",), 1.2),
+            ("/data/local/tmp/window_dump.xml", tuple(), 1.5),
+        )
+
+        for remote_path, dump_args, settle_delay in attempts:
+            self.shell("rm {0}".format(remote_path), check=False)
+            time.sleep(settle_delay)
+            result = self.run(
+                "shell",
+                "uiautomator",
+                "dump",
+                *dump_args,
+                remote_path,
+                check=False,
+                timeout=max(self.timeout, 25),
+            )
+            if result.returncode == 0:
+                remote_check = self.shell("ls -l {0}".format(remote_path), check=False)
+                if remote_check and "No such file" not in remote_check:
+                    try:
+                        self.run("pull", remote_path, str(target), timeout=max(self.timeout, 25))
+                        self.shell("rm {0}".format(remote_path), check=False)
+                        return target
+                    except ADBError as exc:
+                        last_error = exc
+                else:
+                    last_error = ADBError(
+                        "UI dump file was not created on device at {0}.".format(remote_path)
+                    )
+            else:
+                last_error = ADBError(
+                    "uiautomator dump failed with code {0}. stdout={1} stderr={2}".format(
+                        result.returncode,
+                        result.stdout.strip(),
+                        result.stderr.strip(),
+                    )
+                )
+            time.sleep(1.0)
+
+        raise last_error or ADBError("Failed to dump UI hierarchy.")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,8 +18,15 @@ class SQLiteMemory(object):
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(str(self.db_path))
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _managed_connect(self):
+        return closing(self._connect())
+
     def _initialize(self) -> None:
-        with self._connect() as conn:
+        with self._managed_connect() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_preferences (
@@ -95,8 +103,8 @@ class SQLiteMemory(object):
     def save_user_preference(
         self, preference_key: str, preference_value: str, confidence: float = 1.0
     ) -> None:
-        timestamp = datetime.utcnow().isoformat()
-        with self._connect() as conn:
+        timestamp = self._utc_now_iso()
+        with self._managed_connect() as conn:
             conn.execute(
                 """
                 INSERT INTO user_preferences (preference_key, preference_value, confidence, timestamp)
@@ -121,8 +129,8 @@ class SQLiteMemory(object):
     ) -> bool:
         if not verified:
             return False
-        timestamp = datetime.utcnow().isoformat()
-        with self._connect() as conn:
+        timestamp = self._utc_now_iso()
+        with self._managed_connect() as conn:
             conn.execute(
                 """
                 INSERT INTO successful_trajectories
@@ -142,8 +150,8 @@ class SQLiteMemory(object):
         steps_summary: str,
         confidence: float,
     ) -> None:
-        timestamp = datetime.utcnow().isoformat()
-        with self._connect() as conn:
+        timestamp = self._utc_now_iso()
+        with self._managed_connect() as conn:
             conn.execute(
                 """
                 INSERT INTO failure_patterns
@@ -161,8 +169,8 @@ class SQLiteMemory(object):
         source_app: str = "contacts_provider",
         confidence: float = 1.0,
     ) -> None:
-        timestamp = datetime.utcnow().isoformat()
-        with self._connect() as conn:
+        timestamp = self._utc_now_iso()
+        with self._managed_connect() as conn:
             conn.execute(
                 """
                 INSERT INTO known_contacts
@@ -178,7 +186,7 @@ class SQLiteMemory(object):
             conn.commit()
 
     def list_contacts(self, limit: int = 20) -> List[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._managed_connect() as conn:
             cursor = conn.execute(
                 """
                 SELECT contact_name, phone_number, source_app, confidence, last_seen_timestamp
@@ -201,7 +209,7 @@ class SQLiteMemory(object):
         ]
 
     def get_contact_by_name(self, contact_name: str) -> Optional[Dict[str, Any]]:
-        with self._connect() as conn:
+        with self._managed_connect() as conn:
             cursor = conn.execute(
                 """
                 SELECT contact_name, phone_number, source_app, confidence, last_seen_timestamp
@@ -223,13 +231,13 @@ class SQLiteMemory(object):
             "last_seen_timestamp": row[4],
         }
 
-    def get_relevant_contacts(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def get_relevant_contacts(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
         normalized = (query or "").strip().lower()
         if not normalized:
             return self.list_contacts(limit=limit)
 
         wildcard = "%{0}%".format(normalized.replace(" ", "%"))
-        with self._connect() as conn:
+        with self._managed_connect() as conn:
             cursor = conn.execute(
                 """
                 SELECT contact_name, phone_number, source_app, confidence, last_seen_timestamp
@@ -314,7 +322,7 @@ class SQLiteMemory(object):
         """.format(table_name, " AND ".join(clauses))
         params.append(limit)
 
-        with self._connect() as conn:
+        with self._managed_connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [
             {
@@ -353,7 +361,7 @@ class SQLiteMemory(object):
         """.format(app_clause)
         union_params = params + params + [limit]
 
-        with self._connect() as conn:
+        with self._managed_connect() as conn:
             cursor = conn.execute(query, union_params)
             rows = cursor.fetchall()
 

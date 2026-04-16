@@ -6,9 +6,11 @@ from unittest import mock
 from app.demo_config import build_demo_message_config
 from app.executor import Executor
 from app.memory import SQLiteMemory
+from app.page_reasoner import PageReasoner
 from app.planner import RuleBasedPlanner
 from app.skills import build_skill_registry
 from app.state import AgentState
+from app.utils.adb import ADBError
 from app.utils.logger import setup_logger
 from app.utils.screenshot import ScreenshotManager
 
@@ -49,7 +51,12 @@ REMINDER_EDITOR_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 REMINDER_SAVED_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <hierarchy>
-  <node text="Buy milk" resource-id="event_title" content-desc="" clickable="false" bounds="[80,240][700,320]" class="android.widget.TextView" />
+  <node text="Search" resource-id="action_search" content-desc="Search" clickable="true" bounds="[680,180][824,324]" class="android.widget.Button" />
+  <node text="Jump to Today" resource-id="action_today" content-desc="Jump to Today" clickable="true" bounds="[824,180][968,324]" class="android.widget.Button" />
+  <node text="Open Tasks" resource-id="action_tasks" content-desc="Open Tasks" clickable="true" bounds="[968,180][1112,324]" class="android.widget.Button" />
+  <node text="Creation menu" resource-id="fab_container" content-desc="Creation menu" clickable="true" bounds="[1040,2568][1208,2736]" class="android.view.View" />
+  <node text="Wednesday 15 April 2026, Open Schedule View" resource-id="day_header" content-desc="Wednesday 15 April 2026, Open Schedule View" clickable="false" bounds="[0,774][192,936]" class="android.view.View" />
+  <node text="buy milk, 7:00 PM – 8:00 PM" resource-id="event_title" content-desc="buy milk, 7:00 PM – 8:00 PM" clickable="false" bounds="[192,1146][1233,1329]" class="android.view.View" />
 </hierarchy>
 """
 
@@ -61,13 +68,16 @@ MISSING_SEND_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 class MockADB(object):
-    def __init__(self, xml_map, initial_screen="message_thread"):
+    def __init__(self, xml_map, initial_screen="message_thread", installed_packages=None):
         self.xml_map = xml_map
         self.current_screen = initial_screen
         self.device_id = "emulator-5554"
         self.input_history = []
         self.intent_history = []
         self.calendar_history = []
+        if installed_packages is None:
+            installed_packages = ["com.google.android.keep"]
+        self.installed_packages = set(installed_packages)
 
     def get_screen_size(self):
         return (1080, 2400)
@@ -98,6 +108,9 @@ class MockADB(object):
     def force_stop_app(self, package_name):
         return None
 
+    def is_package_installed(self, package_name):
+        return package_name in self.installed_packages
+
     def start_sendto_intent(self, phone_number, body=None, wait_time=1.0):
         self.intent_history.append({"phone_number": phone_number, "body": body})
         self.current_screen = "message_thread"
@@ -113,6 +126,8 @@ class MockADB(object):
         self.current_screen = "reminder_editor"
 
     def open_app(self, package_name, activity_name=None, wait_time=1.0):
+        if package_name not in self.installed_packages:
+            raise ADBError("package missing")
         if package_name == "com.google.android.keep":
             self.current_screen = "keep_home"
 
@@ -142,7 +157,7 @@ class ExecutorTests(unittest.TestCase):
             db_path.unlink()
         return SQLiteMemory(db_path=str(db_path))
 
-    def _build_executor(self, adb, memory, logger_name):
+    def _build_executor(self, adb, memory, logger_name, page_reasoner=None):
         logger = setup_logger(name=logger_name)
         state = AgentState()
         screenshot_manager = ScreenshotManager(base_dir="data/screenshots/test")
@@ -153,6 +168,8 @@ class ExecutorTests(unittest.TestCase):
             screenshot_manager=screenshot_manager,
             skill_registry=build_skill_registry(),
             memory=memory,
+            context_builder=None,
+            page_reasoner=page_reasoner or PageReasoner(backend="rule"),
             runtime_config=build_demo_message_config(
                 contact_name="Dave Zhu",
                 phone_number="+18059577464",
@@ -207,6 +224,20 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(state.artifacts["extracted_value"], "ZX-2048")
         self.assertIn("ZX-2048", adb.input_history[-1])
 
+    def test_read_current_screen_reasoning_extracts_visible_value(self):
+        adb = MockADB({"booking_page": BOOKING_XML}, initial_screen="booking_page")
+        memory = self._build_memory("executor_read_current_screen.db")
+        executor, state = self._build_executor(adb, memory, "test-agent-read-current")
+        planner = RuleBasedPlanner(demo_config=build_demo_message_config())
+        plan = planner.plan("extract the visible order number from the current page", {})
+
+        result = executor.execute_plan(plan, agent_mode="interactive", max_steps=2)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["task_type"], "read_current_screen")
+        self.assertEqual(state.artifacts["extracted_value"], "ZX-2048")
+        self.assertIn("last_page_reasoning", state.artifacts)
+
     def test_create_reminder_flow_opens_calendar_and_saves(self):
         adb = MockADB(
             {
@@ -227,6 +258,75 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(result["task_type"], "create_reminder")
         self.assertEqual(adb.calendar_history[0]["title"], "buy milk")
         self.assertEqual(state.current_page, "reminder_saved")
+
+    def test_guided_ui_task_read_only_request_stops_after_reasoning(self):
+        adb = MockADB(
+            {
+                "keep_home": KEEP_HOME_XML,
+                "keep_editor": KEEP_EDITOR_XML,
+            },
+            initial_screen="keep_home",
+        )
+        memory = self._build_memory("executor_guided_ui.db")
+        executor, state = self._build_executor(adb, memory, "test-agent-guided-ui")
+        planner = RuleBasedPlanner(demo_config=build_demo_message_config())
+        plan = planner.plan("open keep and tell me what is on the current page", {})
+
+        result = executor.execute_plan(plan, agent_mode="interactive", max_steps=2)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["task_type"], "guided_ui_task")
+        self.assertEqual(state.current_page, "keep_home")
+        self.assertFalse(any(step["action"] == "tap" for step in result["steps"]))
+        self.assertIn("last_page_reasoning", state.artifacts)
+
+    def test_guided_ui_task_rejects_invalid_interactive_action(self):
+        class InvalidReasoner(object):
+            def reason(self, *args, **kwargs):
+                return {
+                    "page_type": "keep_home",
+                    "summary": "Invalid action test",
+                    "facts": [],
+                    "targets": [],
+                    "next_action": {"skill": "reason_about_page", "args": {}},
+                    "confidence": 0.4,
+                    "requires_confirmation": False,
+                }
+
+        adb = MockADB({"keep_home": KEEP_HOME_XML}, initial_screen="keep_home")
+        memory = self._build_memory("executor_guided_invalid.db")
+        executor, _state = self._build_executor(
+            adb,
+            memory,
+            "test-agent-guided-invalid",
+            page_reasoner=InvalidReasoner(),
+        )
+        planner = RuleBasedPlanner(demo_config=build_demo_message_config())
+        plan = planner.plan("open keep and tell me what is on the current page", {})
+
+        result = executor.execute_plan(plan, agent_mode="interactive", max_steps=2)
+
+        self.assertFalse(result["success"])
+        self.assertIn("not allowed", result["steps"][-1]["detail"])
+
+    def test_extract_and_copy_missing_target_app_fails_cleanly(self):
+        adb = MockADB(
+            {
+                "booking_page": BOOKING_XML,
+            },
+            initial_screen="booking_page",
+            installed_packages=[],
+        )
+        memory = self._build_memory("executor_extract_missing_app.db")
+        executor, state = self._build_executor(adb, memory, "test-agent-extract-missing-app")
+        planner = RuleBasedPlanner(demo_config=build_demo_message_config())
+        plan = planner.plan("extract the order number and copy it into notes", {})
+
+        result = executor.execute_plan(plan)
+
+        self.assertFalse(result["success"])
+        self.assertTrue(state.needs_replan)
+        self.assertIn("not installed", result["steps"][2]["detail"])
 
     def test_missing_send_marks_replan_and_records_failure(self):
         adb = MockADB({"message_thread": MISSING_SEND_XML})
@@ -256,4 +356,3 @@ class ExecutorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

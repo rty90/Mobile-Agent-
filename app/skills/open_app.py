@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Mapping
 
 from app.skills.base import BaseSkill, SkillContext
+from app.utils.adb import ADBError
 
 
 APP_NAME_TO_PACKAGE = {
@@ -30,6 +31,22 @@ class OpenAppSkill(BaseSkill):
             return self.result(success=False, detail="Missing package_name or supported app name.")
 
         activity_name = args.get("activity_name")
-        context.adb.open_app(package_name=str(package_name), activity_name=activity_name)
+        package_name = str(package_name)
+        if hasattr(context.adb, "is_package_installed") and not context.adb.is_package_installed(package_name):
+            return self.result(
+                success=False,
+                detail="Target app is not installed: {0}".format(package_name),
+                data={"package_name": package_name},
+            )
+
+        try:
+            context.adb.open_app(package_name=package_name, activity_name=activity_name)
+        except ADBError as exc:
+            return self.result(
+                success=False,
+                detail="Failed to open app {0}: {1}".format(package_name, exc),
+                data={"package_name": package_name},
+            )
+
         context.state.current_app = str(package_name)
         return self.result(success=True, detail="Opened app {0}.".format(package_name))

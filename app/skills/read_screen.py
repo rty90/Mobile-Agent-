@@ -65,6 +65,9 @@ def detect_page_name(
     best_score = 0
     for page_name, profile in runtime_config.page_profiles.items():
         score = 0
+        for app_hint in getattr(profile, "app_hints", ()):
+            if normalize_text(app_hint) in corpus:
+                score += 2
         for keyword in profile.keywords:
             if normalize_text(keyword) in corpus:
                 score += 1

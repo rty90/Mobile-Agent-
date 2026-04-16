@@ -6,17 +6,26 @@ from typing import Dict, Optional
 
 
 def _parse_hour_minute(text: str) -> Optional[Dict[str, int]]:
-    match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text, re.IGNORECASE)
-    if not match:
-        return None
-    hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
-    meridiem = match.group(3).lower()
+    english_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text, re.IGNORECASE)
+    if english_match:
+        hour = int(english_match.group(1))
+        minute = int(english_match.group(2) or 0)
+        meridiem = english_match.group(3).lower()
 
-    if hour == 12:
-        hour = 0
-    if meridiem == "pm":
-        hour += 12
+        if hour == 12:
+            hour = 0
+        if meridiem == "pm":
+            hour += 12
+        return {"hour": hour, "minute": minute}
+
+    chinese_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*点(半)?", text)
+    if not chinese_match:
+        return None
+
+    hour = int(chinese_match.group(1))
+    minute = int(chinese_match.group(2) or 0)
+    if chinese_match.group(3):
+        minute = 30
     return {"hour": hour, "minute": minute}
 
 
@@ -32,15 +41,18 @@ def parse_reminder_task(
 
     title = explicit_title
     if not title:
-        match = re.search(
+        english_match = re.search(
             r"(?:create\s+(?:a\s+)?)?reminder(?:\s+for)?\s+(.+?)(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)|\s+tomorrow.*)?$",
             lower,
             re.IGNORECASE,
         )
-        if match:
-            title = match.group(1).strip()
+        if english_match:
+            title = english_match.group(1).strip()
     if not title:
-        chinese_match = re.search(r"提醒(?:事项)?(?:为|：)?(.+?)(?:明天.*|\d{1,2}点.*)?$", normalized)
+        chinese_match = re.search(
+            r"(?:创建|建立|新增|添加)?(?:一个)?(?:提醒|提醒事项|待办)(?:为|是|事项为)?\s*(.+?)(?:\s*(?:在|到)?\s*\d{1,2}(?::\d{2})?\s*(?:点|点半|am|pm)|\s*明天.*)?$",
+            normalized,
+        )
         if chinese_match:
             title = chinese_match.group(1).strip()
     if not title:
@@ -48,9 +60,17 @@ def parse_reminder_task(
 
     time_text = explicit_time
     if not time_text:
-        time_match = re.search(r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b", lower, re.IGNORECASE)
-        if time_match:
-            time_text = time_match.group(1).strip()
+        english_time_match = re.search(
+            r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm))\b",
+            lower,
+            re.IGNORECASE,
+        )
+        if english_time_match:
+            time_text = english_time_match.group(1).strip()
+    if not time_text:
+        chinese_time_match = re.search(r"(\d{1,2}(?::\d{2})?\s*点半?)", normalized)
+        if chinese_time_match and ("提醒" in normalized or "待办" in normalized):
+            time_text = chinese_time_match.group(1).strip()
 
     target_date = now.date()
     if "tomorrow" in lower or "明天" in normalized:
@@ -66,7 +86,7 @@ def parse_reminder_task(
             parsed_time["hour"],
             parsed_time["minute"],
         )
-        if "tomorrow" not in lower and event_dt <= now:
+        if "tomorrow" not in lower and "明天" not in normalized and event_dt <= now:
             event_dt += timedelta(days=1)
         begin_time_ms = int(event_dt.timestamp() * 1000)
 
@@ -75,4 +95,3 @@ def parse_reminder_task(
         "time_text": time_text,
         "begin_time_ms": begin_time_ms,
     }
-
