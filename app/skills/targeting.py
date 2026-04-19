@@ -6,7 +6,19 @@ from app.demo_config import DemoMessageConfig, scale_ratio_point
 
 
 def normalize_text(value: str) -> str:
-    return " ".join((value or "").strip().lower().split())
+    normalized = (value or "").strip().lower()
+    for char in (":", "_", "-", "/", "(", ")", "[", "]", ",", ".", "!", "?"):
+        normalized = normalized.replace(char, " ")
+    return " ".join(normalized.split())
+
+
+def _tokenize(value: str) -> list:
+    tokens = []
+    for token in normalize_text(value).split():
+        if len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        tokens.append(token)
+    return tokens
 
 
 def candidate_match_score(candidate: Dict[str, Any], target: str) -> int:
@@ -17,13 +29,23 @@ def candidate_match_score(candidate: Dict[str, Any], target: str) -> int:
     label = normalize_text(candidate.get("label", ""))
     resource_id = normalize_text(candidate.get("resource_id", ""))
     content_desc = normalize_text(candidate.get("content_desc", ""))
+    clickable = bool(candidate.get("clickable"))
+
+    label_tokens = _tokenize(label)
+    target_tokens = _tokenize(target_normalized)
 
     if label == target_normalized:
-        return 100
+        return 105 if clickable else 100
+    if len(label_tokens) >= 2 and len(target_tokens) >= 2 and label_tokens[-2:] == target_tokens[-2:]:
+        return 95 if clickable else 88
     if target_normalized and label.startswith(target_normalized):
-        return 90
+        return 92 if clickable else 90
     if target_normalized and target_normalized in label:
-        return 80
+        return 84 if clickable else 80
+    if target_tokens:
+        overlap = len(set(label_tokens) & set(target_tokens))
+        if overlap:
+            return 76 + overlap if clickable else 68 + overlap
     if resource_id.endswith(target_normalized):
         return 70
     if target_normalized and target_normalized in resource_id:

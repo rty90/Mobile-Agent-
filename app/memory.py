@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -80,6 +82,25 @@ class SQLiteMemory(object):
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ui_shortcuts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT NOT NULL,
+                    app TEXT NOT NULL DEFAULT '',
+                    page TEXT NOT NULL,
+                    intent_key TEXT NOT NULL,
+                    skill TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    target_label TEXT NOT NULL DEFAULT '',
+                    target_key TEXT NOT NULL DEFAULT '',
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    use_count INTEGER NOT NULL DEFAULT 1,
+                    last_seen_timestamp TEXT NOT NULL,
+                    UNIQUE(task_type, app, page, intent_key, skill, target_label, target_key)
+                )
+                """
+            )
             self._ensure_column(conn, "successful_trajectories", "task_type", "TEXT")
             self._ensure_column(conn, "failure_patterns", "task_type", "TEXT")
             conn.commit()
@@ -117,6 +138,132 @@ class SQLiteMemory(object):
                 (preference_key, preference_value, confidence, timestamp),
             )
             conn.commit()
+
+    @staticmethod
+    def _normalize_intent_key(intent: str) -> str:
+        normalized = re.sub(r"\s+", " ", (intent or "").strip().lower())
+        return normalized[:240]
+
+    @staticmethod
+    def _normalize_app_key(app: Optional[str]) -> str:
+        candidate = str(app or "").strip()
+        if not candidate:
+            return ""
+        if any(marker in candidate for marker in (" ", "=", "mCurrentFocus", "Window{")):
+            return ""
+        return candidate
+
+    def remember_ui_shortcut(
+        self,
+        task_type: str,
+        app: str,
+        page: str,
+        intent: str,
+        skill: str,
+        args: Dict[str, Any],
+        confidence: float = 1.0,
+    ) -> bool:
+        if not task_type or not page or not intent or not skill:
+            return False
+
+        timestamp = self._utc_now_iso()
+        safe_args = dict(args or {})
+        args_json = json.dumps(safe_args, ensure_ascii=False, sort_keys=True)
+        target_label = str(safe_args.get("target") or "").strip()
+        target_key = str(safe_args.get("target_key") or "").strip()
+        intent_key = self._normalize_intent_key(intent)
+
+        with self._managed_connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ui_shortcuts
+                (task_type, app, page, intent_key, skill, args_json, target_label, target_key, confidence, use_count, last_seen_timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(task_type, app, page, intent_key, skill, target_label, target_key) DO UPDATE SET
+                    args_json = excluded.args_json,
+                    confidence = CASE
+                        WHEN excluded.confidence > ui_shortcuts.confidence THEN excluded.confidence
+                        ELSE ui_shortcuts.confidence
+                    END,
+                    use_count = ui_shortcuts.use_count + 1,
+                    last_seen_timestamp = excluded.last_seen_timestamp
+                """,
+                (
+                    task_type,
+                    self._normalize_app_key(app),
+                    page,
+                    intent_key,
+                    skill,
+                    args_json,
+                    target_label,
+                    target_key,
+                    float(confidence),
+                    timestamp,
+                ),
+            )
+            conn.commit()
+        return True
+
+    @staticmethod
+    def _screen_has_target(screen_summary: Dict[str, Any], target_label: str) -> bool:
+        lowered = (target_label or "").strip().lower()
+        if not lowered:
+            return False
+        for item in screen_summary.get("possible_targets", []):
+            label = str((item or {}).get("label") or "").strip().lower()
+            if label and (label == lowered or lowered in label or label in lowered):
+                return True
+        for item in screen_summary.get("visible_text", []):
+            text = str(item).strip().lower()
+            if text and (text == lowered or lowered in text or text in lowered):
+                return True
+        return False
+
+    def find_ui_shortcut(
+        self,
+        task_type: str,
+        app: Optional[str],
+        page: str,
+        intent: str,
+        screen_summary: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not task_type or not page or not intent:
+            return None
+
+        intent_key = self._normalize_intent_key(intent)
+        app_key = self._normalize_app_key(app)
+        with self._managed_connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT app, page, intent_key, skill, args_json, target_label, target_key, confidence, use_count, last_seen_timestamp
+                FROM ui_shortcuts
+                WHERE task_type = ? AND page = ? AND intent_key = ? AND (app = ? OR app = '')
+                ORDER BY CASE WHEN app = ? THEN 0 ELSE 1 END, confidence DESC, use_count DESC, last_seen_timestamp DESC
+                LIMIT 5
+                """,
+                (task_type, page, intent_key, app_key, app_key),
+            ).fetchall()
+
+        summary = screen_summary or {}
+        for row in rows:
+            args = json.loads(row[4]) if row[4] else {}
+            target_label = row[5] or str(args.get("target") or "").strip()
+            target_key = row[6] or str(args.get("target_key") or "").strip()
+            if target_label and not self._screen_has_target(summary, target_label) and not target_key:
+                continue
+            return {
+                "app": row[0],
+                "page": row[1],
+                "intent_key": row[2],
+                "skill": row[3],
+                "args": args,
+                "target_label": target_label,
+                "target_key": target_key,
+                "confidence": float(row[7]),
+                "use_count": int(row[8]),
+                "last_seen_timestamp": row[9],
+            }
+        return None
 
     def add_successful_trajectory(
         self,

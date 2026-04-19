@@ -25,6 +25,28 @@ class TargetingTests(unittest.TestCase):
         target = find_semantic_target(summary, "search")
         self.assertEqual(target["bounds"]["center_x"], 20)
 
+    def test_semantic_target_matches_keep_note_entry_variant(self):
+        summary = {
+            "possible_targets": [
+                {
+                    "label": "Notes you add appear here",
+                    "resource_id": "empty_view_text",
+                    "content_desc": "",
+                    "clickable": False,
+                    "bounds": {"center_x": 100, "center_y": 100},
+                },
+                {
+                    "label": "Create a note",
+                    "resource_id": "speed_dial_create_close_button",
+                    "content_desc": "Create a note",
+                    "clickable": True,
+                    "bounds": {"center_x": 200, "center_y": 200},
+                },
+            ]
+        }
+        target = find_semantic_target(summary, "take a note")
+        self.assertEqual(target["bounds"]["center_x"], 200)
+
     def test_fallback_target_scales_coordinates(self):
         config = build_demo_message_config()
         fallback = find_fallback_target(

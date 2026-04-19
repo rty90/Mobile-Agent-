@@ -9,8 +9,11 @@ from app.context_builder import ContextBuilder
 from app.demo_config import build_demo_message_config
 from app.executor import Executor
 from app.memory import SQLiteMemory
+from app.model_runtime import ModelRuntime
 from app.page_reasoner import PageReasoner
 from app.planner import PlanStep, TaskPlanner
+from app.reasoning_orchestrator import ReasoningOrchestrator
+from app.reasoning_validator import ReasoningValidator
 from app.router import TaskRouter
 from app.skills import build_skill_registry
 from app.state import AgentState
@@ -22,6 +25,7 @@ from app.task_types import (
     TASK_SEND_MESSAGE,
     TASK_UNSUPPORTED,
 )
+from app.trace_bus import TraceBus
 from app.utils.adb import ADBClient, ADBError
 from app.utils.logger import setup_logger
 from app.utils.screenshot import ScreenshotManager
@@ -64,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reasoner-backend",
         default="rule",
-        choices=["rule", "local", "openai"],
+        choices=["rule", "local", "openai", "stack"],
         help="Page reasoner backend.",
     )
     parser.add_argument(
@@ -93,7 +97,21 @@ def build_runtime(device_id=None, planner_backend="rule", reasoner_backend="rule
     memory = SQLiteMemory(db_path=MEMORY_PATH)
     demo_config = demo_config or build_demo_message_config()
     context_builder = ContextBuilder(memory=memory)
-    page_reasoner = PageReasoner(backend=reasoner_backend)
+    trace_bus = TraceBus(console_enabled=(reasoner_backend == "stack"))
+    model_runtime = ModelRuntime()
+    reasoning_validator = ReasoningValidator(
+        min_confidence=float(os.environ.get("REASONING_MIN_CONFIDENCE", "0.70"))
+    )
+    reasoning_orchestrator = ReasoningOrchestrator(
+        validator=reasoning_validator,
+        model_runtime=model_runtime,
+        trace_bus=trace_bus,
+        rule_fallback=PageReasoner(backend="rule").reason,
+    )
+    page_reasoner = PageReasoner(
+        backend=reasoner_backend,
+        orchestrator=reasoning_orchestrator if reasoner_backend == "stack" else None,
+    )
     planner = TaskPlanner(
         context_builder=context_builder,
         backend=planner_backend,
@@ -111,6 +129,7 @@ def build_runtime(device_id=None, planner_backend="rule", reasoner_backend="rule
         context_builder=context_builder,
         page_reasoner=page_reasoner,
         runtime_config=demo_config,
+        trace_bus=trace_bus,
     )
     return {
         "logger": logger,
@@ -119,6 +138,10 @@ def build_runtime(device_id=None, planner_backend="rule", reasoner_backend="rule
         "memory": memory,
         "context_builder": context_builder,
         "page_reasoner": page_reasoner,
+        "reasoning_orchestrator": reasoning_orchestrator,
+        "reasoning_validator": reasoning_validator,
+        "model_runtime": model_runtime,
+        "trace_bus": trace_bus,
         "planner": planner,
         "router": router,
         "executor": executor,
@@ -141,81 +164,96 @@ def run_task(
     if auto_confirm:
         os.environ["AGENT_AUTO_CONFIRM"] = "1"
 
-    runtime = build_runtime(
-        device_id=device_id,
-        planner_backend=planner_backend,
-        reasoner_backend=reasoner_backend,
-        demo_config=demo_config,
-    )
-    logger = runtime["logger"]
-    adb = runtime["adb"]
-    state = runtime["state"]
-    planner = runtime["planner"]
-    router = runtime["router"]
-    executor = runtime["executor"]
-
-    decision = router.route(task_text, state=state, task_type_override=task_type_override)
-    state.risk_flag = decision.requires_confirmation
-    state.task_type = decision.task_type
-    resolved_agent_mode = agent_mode
-    if not resolved_agent_mode:
-        if decision.task_type in (TASK_READ_CURRENT_SCREEN, TASK_GUIDED_UI_TASK):
-            resolved_agent_mode = "interactive"
-        else:
-            resolved_agent_mode = "bounded"
-
-    plan = planner.create_plan(task_text, state=state, task_type_override=decision.task_type)
-
-    if not decision.supported or decision.mode == "unsupported-task" or plan.status == "unsupported":
-        return {
-            "goal": task_text,
-            "task_type": decision.task_type,
-            "status": "unsupported",
-            "success": False,
-            "route_mode": decision.mode,
-            "reason": decision.reason,
-            "message": plan.message,
-            "agent_mode": resolved_agent_mode,
-            "logs_path": LOG_PATH,
-            "screenshots_root": SCREENSHOT_ROOT,
-            "memory_path": MEMORY_PATH,
-        }
-
-    if decision.requires_confirmation:
-        plan.steps.insert(
-            0,
-            PlanStep(
-                "confirm_action",
-                {"prompt": "High-risk task detected. Continue execution?"},
-            ),
+    runtime = None
+    try:
+        runtime = build_runtime(
+            device_id=device_id,
+            planner_backend=planner_backend,
+            reasoner_backend=reasoner_backend,
+            demo_config=demo_config,
         )
+        logger = runtime["logger"]
+        adb = runtime["adb"]
+        state = runtime["state"]
+        planner = runtime["planner"]
+        router = runtime["router"]
+        executor = runtime["executor"]
+        trace_bus = runtime["trace_bus"]
 
-    if dry_run:
-        return {
-            "goal": task_text,
-            "task_type": plan.task_type,
-            "status": "dry-run",
-            "success": True,
-            "route_mode": decision.mode,
-            "reason": decision.reason,
-            "risk_level": decision.risk_level,
-            "agent_mode": resolved_agent_mode,
-            "plan": plan.to_dict(),
-            "logs_path": LOG_PATH,
-            "screenshots_root": SCREENSHOT_ROOT,
-            "memory_path": MEMORY_PATH,
-        }
+        trace_bus.emit(
+            stage="route.start",
+            backend="router",
+            success=True,
+            reason_summary="Routing the requested task.",
+            extra={"goal": task_text, "task_type_override": task_type_override},
+        )
+        decision = router.route(task_text, state=state, task_type_override=task_type_override)
+        state.risk_flag = decision.requires_confirmation
+        state.task_type = decision.task_type
+        resolved_agent_mode = agent_mode
+        if not resolved_agent_mode:
+            if decision.task_type in (TASK_READ_CURRENT_SCREEN, TASK_GUIDED_UI_TASK):
+                resolved_agent_mode = "interactive"
+            else:
+                resolved_agent_mode = "bounded"
 
-    adb.ensure_device()
-    result = executor.execute_plan(plan, agent_mode=resolved_agent_mode, max_steps=max_steps)
-    result["route_mode"] = decision.mode
-    result["reason"] = decision.reason
-    result["risk_level"] = decision.risk_level
-    result["logs_path"] = LOG_PATH
-    result["screenshots_root"] = SCREENSHOT_ROOT
-    result["memory_path"] = MEMORY_PATH
-    logger.info("Task completed with success=%s", result["success"])
-    return result
+        plan = planner.create_plan(task_text, state=state, task_type_override=decision.task_type)
+
+        if not decision.supported or decision.mode == "unsupported-task" or plan.status == "unsupported":
+            return {
+                "goal": task_text,
+                "task_type": decision.task_type,
+                "status": "unsupported",
+                "success": False,
+                "route_mode": decision.mode,
+                "reason": decision.reason,
+                "message": plan.message,
+                "agent_mode": resolved_agent_mode,
+                "logs_path": LOG_PATH,
+                "screenshots_root": SCREENSHOT_ROOT,
+                "memory_path": MEMORY_PATH,
+            }
+
+        if decision.requires_confirmation:
+            plan.steps.insert(
+                0,
+                PlanStep(
+                    "confirm_action",
+                    {"prompt": "High-risk task detected. Continue execution?"},
+                ),
+            )
+
+        if dry_run:
+            return {
+                "goal": task_text,
+                "task_type": plan.task_type,
+                "status": "dry-run",
+                "success": True,
+                "route_mode": decision.mode,
+                "reason": decision.reason,
+                "risk_level": decision.risk_level,
+                "agent_mode": resolved_agent_mode,
+                "plan": plan.to_dict(),
+                "logs_path": LOG_PATH,
+                "screenshots_root": SCREENSHOT_ROOT,
+                "memory_path": MEMORY_PATH,
+                "trace_path": str(trace_bus.trace_path),
+            }
+
+        adb.ensure_device()
+        result = executor.execute_plan(plan, agent_mode=resolved_agent_mode, max_steps=max_steps)
+        result["route_mode"] = decision.mode
+        result["reason"] = decision.reason
+        result["risk_level"] = decision.risk_level
+        result["logs_path"] = LOG_PATH
+        result["screenshots_root"] = SCREENSHOT_ROOT
+        result["memory_path"] = MEMORY_PATH
+        result["trace_path"] = str(trace_bus.trace_path)
+        logger.info("Task completed with success=%s", result["success"])
+        return result
+    finally:
+        if runtime and runtime.get("model_runtime"):
+            runtime["model_runtime"].shutdown_owned_processes()
 
 
 def main() -> int:

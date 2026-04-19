@@ -35,8 +35,18 @@ class TapSkill(BaseSkill):
         )
         context.state.update_screen_summary(summary)
 
-        candidate = _find_target(summary, str(target))
         fallback_used = False
+        candidate = None
+        if args.get("prefer_fallback") and args.get("target_key"):
+            candidate = find_fallback_target(
+                context.runtime_config,
+                context.state.current_page or summary.get("page", ""),
+                str(args.get("target_key")),
+                context.adb.get_screen_size(),
+            )
+            fallback_used = bool(candidate)
+        if not candidate:
+            candidate = _find_target(summary, str(target))
         if (not candidate or not candidate.get("bounds")) and args.get("target_key"):
             candidate = find_fallback_target(
                 context.runtime_config,

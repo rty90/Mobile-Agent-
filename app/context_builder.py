@@ -82,6 +82,25 @@ class ContextBuilder(object):
                 break
         return filtered
 
+    def _build_ui_shortcut(
+        self,
+        goal: str,
+        state: AgentState,
+        task_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        summary = state.screen_summary or {}
+        page_name = str(summary.get("page") or state.current_page or "").strip()
+        app_name = str(state.current_app or summary.get("app") or "").strip()
+        if not page_name:
+            return None
+        return self.memory.find_ui_shortcut(
+            task_type=task_type,
+            app=app_name,
+            page=page_name,
+            intent=goal,
+            screen_summary=summary,
+        )
+
     def _build_contact_context(self, goal: str) -> List[Dict[str, Any]]:
         contact_query = extract_contact_query(goal)
         if contact_query:
@@ -108,6 +127,7 @@ class ContextBuilder(object):
             "top_targets": self._top_targets(state.screen_summary or {}),
             "recent_actions": state.recent_action_context(limit=2),
             "relevant_memories": self._build_memories(resolved_task_type, goal, current_app),
+            "ui_shortcut": self._build_ui_shortcut(goal, state, resolved_task_type),
             "risk_flag": state.risk_flag,
         }
 
@@ -146,3 +166,29 @@ class ContextBuilder(object):
                 context["target_package"] = guided_task["target_package"]
 
         return context
+
+    def build_reasoning_input(
+        self,
+        goal: str,
+        state: AgentState,
+        task_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        context = self.build(goal=goal, state=state, task_type=task_type)
+        return {
+            "goal": context["goal"],
+            "task_type": context["task_type"],
+            "current_app": context.get("current_app"),
+            "screen_summary": context.get("screen_summary"),
+            "visible_text_excerpt": context.get("visible_text_excerpt", []),
+            "top_targets": context.get("top_targets", []),
+            "recent_actions": context.get("recent_actions", []),
+            "relevant_memories": context.get("relevant_memories", []),
+            "ui_shortcut": context.get("ui_shortcut"),
+            "risk_flag": context.get("risk_flag", False),
+            "known_contact": context.get("known_contact"),
+            "target_app_hint": context.get("target_app_hint"),
+            "target_package": context.get("target_package"),
+            "parsed_reminder": context.get("parsed_reminder"),
+            "field_hint": context.get("field_hint"),
+            "summary_style": context.get("summary_style"),
+        }

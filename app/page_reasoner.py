@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 
 from app.extraction import extract_key_value
 from app.page_reader import build_page_bundle
+from app.reasoning_orchestrator import ReasoningOrchestrator
+from app.reasoning_validator import ReasoningValidator
 from app.task_types import (
     TASK_CREATE_REMINDER,
     TASK_EXTRACT_AND_COPY,
@@ -27,7 +29,16 @@ def _top_targets(screen_summary: Dict[str, Any], limit: int = 5) -> List[Dict[st
     targets = []
     seen = set()
     for candidate in screen_summary.get("possible_targets", []):
-        label = (candidate.get("label") or "").strip()
+        if isinstance(candidate, dict):
+            label = (candidate.get("label") or "").strip()
+            resource_id = candidate.get("resource_id")
+            clickable = bool(candidate.get("clickable"))
+            confidence = float(candidate.get("confidence", 0.0))
+        else:
+            label = str(candidate).strip()
+            resource_id = None
+            clickable = False
+            confidence = 0.0
         if not label:
             continue
         key = label.lower()
@@ -37,9 +48,9 @@ def _top_targets(screen_summary: Dict[str, Any], limit: int = 5) -> List[Dict[st
         targets.append(
             {
                 "label": label,
-                "resource_id": candidate.get("resource_id"),
-                "clickable": bool(candidate.get("clickable")),
-                "confidence": float(candidate.get("confidence", 0.0)),
+                "resource_id": resource_id,
+                "clickable": clickable,
+                "confidence": confidence,
             }
         )
         if len(targets) >= limit:
@@ -56,7 +67,10 @@ def _summary_text(screen_summary: Dict[str, Any], limit: int = 4) -> str:
 
 def _first_target_label(screen_summary: Dict[str, Any], keywords: List[str]) -> Optional[str]:
     for candidate in screen_summary.get("possible_targets", []):
-        label = str(candidate.get("label", "")).strip()
+        if isinstance(candidate, dict):
+            label = str(candidate.get("label", "")).strip()
+        else:
+            label = str(candidate).strip()
         lowered = label.lower()
         if label and any(keyword in lowered for keyword in keywords):
             return label
@@ -140,7 +154,12 @@ class RuleBasedPageReasoner(object):
 
     def _suggest_next_action(self, goal: str, screen_summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         page = screen_summary.get("page")
-        labels = [str(item.get("label", "")).lower() for item in screen_summary.get("possible_targets", [])]
+        labels = []
+        for item in screen_summary.get("possible_targets", []):
+            if isinstance(item, dict):
+                labels.append(str(item.get("label", "")).lower())
+            else:
+                labels.append(str(item).lower())
         guided_request = parse_guided_ui_task(goal)
 
         if _is_read_only_guided_request(goal):
@@ -316,11 +335,18 @@ class OpenAIPageReasoner(LocalPageReasoner):
 
 
 class PageReasoner(object):
-    def __init__(self, backend: str = "rule") -> None:
+    def __init__(
+        self,
+        backend: str = "rule",
+        orchestrator: Optional[ReasoningOrchestrator] = None,
+    ) -> None:
         self.backend = backend
         self.rule_reasoner = RuleBasedPageReasoner()
         self.local_reasoner = LocalPageReasoner(fallback_reasoner=self.rule_reasoner)
         self.openai_reasoner = OpenAIPageReasoner(fallback_reasoner=self.rule_reasoner)
+        self.orchestrator = orchestrator
+        if self.orchestrator is None and backend == "stack":
+            self.orchestrator = self._build_default_orchestrator()
 
     def reason(
         self,
@@ -330,7 +356,23 @@ class PageReasoner(object):
         screenshot_path: Optional[str] = None,
         recent_actions: Optional[List[Dict[str, Any]]] = None,
         relevant_memories: Optional[List[Dict[str, Any]]] = None,
+        normalized_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        if self.backend == "stack":
+            if not self.orchestrator:
+                raise PageReasonerError("Stack reasoner requires a reasoning orchestrator.")
+            result = self.orchestrator.resolve(
+                goal=goal,
+                task_type=task_type,
+                screen_summary=screen_summary,
+                screenshot_path=screenshot_path,
+                recent_actions=recent_actions,
+                relevant_memories=relevant_memories,
+                normalized_context=normalized_context,
+            )
+            legacy = dict(result["legacy_reasoning"])
+            legacy["trace_path"] = result["trace_path"]
+            return legacy
         if self.backend == "local":
             return self.local_reasoner.reason(
                 goal=goal,
@@ -356,4 +398,18 @@ class PageReasoner(object):
             screenshot_path=screenshot_path,
             recent_actions=recent_actions,
             relevant_memories=relevant_memories,
+        )
+
+    def _build_default_orchestrator(self) -> ReasoningOrchestrator:
+        from app.model_runtime import ModelRuntime
+        from app.trace_bus import TraceBus
+
+        validator = ReasoningValidator(min_confidence=float(os.environ.get("REASONING_MIN_CONFIDENCE", "0.70")))
+        runtime = ModelRuntime()
+        trace_bus = TraceBus(console_enabled=False)
+        return ReasoningOrchestrator(
+            validator=validator,
+            model_runtime=runtime,
+            trace_bus=trace_bus,
+            rule_fallback=self.rule_reasoner.reason,
         )

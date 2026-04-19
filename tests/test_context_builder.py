@@ -140,6 +140,15 @@ class ContextBuilderTests(unittest.TestCase):
                 confidence=0.9,
                 verified=True,
             )
+            memory.remember_ui_shortcut(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                page="keep_home",
+                intent="open keep and tell me what is on the current page",
+                skill="tap",
+                args={"target": "Take a note", "target_key": "new_note"},
+                confidence=0.97,
+            )
             state = AgentState(
                 current_app="com.google.android.keep",
                 screen_summary={
@@ -157,6 +166,7 @@ class ContextBuilderTests(unittest.TestCase):
 
         self.assertEqual(context["target_app_hint"], "keep")
         self.assertEqual(len(context["relevant_memories"]), 1)
+        self.assertEqual(context["ui_shortcut"]["skill"], "tap")
 
 
 if __name__ == "__main__":

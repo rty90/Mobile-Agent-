@@ -18,7 +18,7 @@ class ReasonAboutPageSkill(BaseSkill):
         screenshot_path = context.state.recent_screenshots[-1] if context.state.recent_screenshots else None
         reasoning_context = {}
         if context.context_builder:
-            reasoning_context = context.context_builder.build(
+            reasoning_context = context.context_builder.build_reasoning_input(
                 goal=goal,
                 state=context.state,
                 task_type=task_type,
@@ -31,6 +31,7 @@ class ReasonAboutPageSkill(BaseSkill):
             screenshot_path=screenshot_path,
             recent_actions=reasoning_context.get("recent_actions"),
             relevant_memories=reasoning_context.get("relevant_memories"),
+            normalized_context=reasoning_context,
         )
 
         artifacts = {"last_page_reasoning": reasoning}

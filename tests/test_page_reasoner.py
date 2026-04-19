@@ -1,6 +1,7 @@
 import unittest
 
 from app.page_reasoner import PageReasoner
+from app.schemas.reasoning_decision import ReasoningDecision
 
 
 class PageReasonerTests(unittest.TestCase):
@@ -72,6 +73,44 @@ class PageReasonerTests(unittest.TestCase):
         )
 
         self.assertIsNone(result["next_action"])
+
+    def test_stack_backend_adapts_reasoning_decision(self):
+        class StubOrchestrator(object):
+            def resolve(self, **kwargs):
+                decision = ReasoningDecision(
+                    decision="execute",
+                    task_type="guided_ui_task",
+                    skill="tap",
+                    args={"target": "Create a note"},
+                    confidence=0.88,
+                    requires_confirmation=False,
+                    reason_summary="Create a note is visible.",
+                    validation_errors=[],
+                    selected_backend="local_text",
+                    fallback_used=False,
+                )
+                return {
+                    "decision": decision,
+                    "trace_path": "data/logs/reasoning_trace.jsonl",
+                    "legacy_reasoning": decision.to_legacy_reasoning_payload(
+                        {"page": "keep_home", "visible_text": ["Create a note"], "possible_targets": []}
+                    ),
+                }
+
+        reasoner = PageReasoner(backend="stack", orchestrator=StubOrchestrator())
+        result = reasoner.reason(
+            goal="open keep and create a note",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_home",
+                "visible_text": ["Create a note"],
+                "possible_targets": [],
+            },
+        )
+
+        self.assertEqual(result["next_action"]["skill"], "tap")
+        self.assertEqual(result["selected_backend"], "local_text")
+        self.assertEqual(result["trace_path"], "data/logs/reasoning_trace.jsonl")
 
 
 if __name__ == "__main__":

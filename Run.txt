@@ -1,0 +1,8 @@
+Desktop UI:
+python -m app.desktop_ui
+
+CLI example:
+python -m app.main --task "open keep and create a note, then type 'hello from desktop ui'" --task-type guided_ui_task --reasoner-backend stack --agent-mode interactive --max-steps 5 --auto-confirm
+
+Tests:
+python -m unittest discover -s tests -v

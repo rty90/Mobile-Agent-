@@ -7,7 +7,7 @@ from app.demo_config import build_demo_message_config
 from app.executor import Executor
 from app.memory import SQLiteMemory
 from app.page_reasoner import PageReasoner
-from app.planner import RuleBasedPlanner
+from app.planner import ExecutionPlan, PlanStep, RuleBasedPlanner
 from app.skills import build_skill_registry
 from app.state import AgentState
 from app.utils.adb import ADBError
@@ -279,6 +279,44 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(state.current_page, "keep_home")
         self.assertFalse(any(step["action"] == "tap" for step in result["steps"]))
         self.assertIn("last_page_reasoning", state.artifacts)
+
+    def test_guided_ui_task_records_verified_shortcut(self):
+        adb = MockADB(
+            {
+                "keep_home": KEEP_HOME_XML,
+                "keep_editor": KEEP_EDITOR_XML,
+            },
+            initial_screen="keep_home",
+        )
+        memory = self._build_memory("executor_guided_shortcut.db")
+        executor, state = self._build_executor(adb, memory, "test-agent-guided-shortcut")
+        plan = ExecutionPlan(
+            goal="open keep and create a note",
+            steps=[
+                PlanStep("open_app", {"package_name": "com.google.android.keep"}),
+                PlanStep("read_screen", {}),
+                PlanStep("reason_about_page", {"goal": "open keep and create a note", "task_type": "guided_ui_task"}),
+            ],
+            task_type="guided_ui_task",
+            status="ready",
+        )
+
+        result = executor.execute_plan(plan, agent_mode="interactive", max_steps=1)
+
+        self.assertTrue(result["success"])
+        shortcut = memory.find_ui_shortcut(
+            task_type="guided_ui_task",
+            app="com.google.android.keep",
+            page="keep_home",
+            intent="open keep and create a note",
+            screen_summary={
+                "page": "keep_home",
+                "visible_text": ["Take a note"],
+                "possible_targets": [{"label": "Take a note", "clickable": True}],
+            },
+        )
+        self.assertIsNotNone(shortcut)
+        self.assertEqual(shortcut["skill"], "tap")
 
     def test_guided_ui_task_rejects_invalid_interactive_action(self):
         class InvalidReasoner(object):

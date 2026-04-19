@@ -27,6 +27,7 @@ class Executor(object):
         context_builder: Any = None,
         page_reasoner: Any = None,
         runtime_config: Any = None,
+        trace_bus: Any = None,
     ) -> None:
         self.adb = adb
         self.state = state
@@ -37,6 +38,7 @@ class Executor(object):
         self.context_builder = context_builder
         self.page_reasoner = page_reasoner
         self.runtime_config = runtime_config
+        self.trace_bus = trace_bus
         self._interactive_allowed_skills = {
             "open_app",
             "tap",
@@ -66,6 +68,18 @@ class Executor(object):
         agent_mode: str = "bounded",
         max_steps: int = 3,
     ) -> Dict[str, Any]:
+        if self.trace_bus:
+            self.trace_bus.emit(
+                stage="executor.start",
+                backend="executor",
+                success=True,
+                reason_summary="Starting bounded execution.",
+                extra={
+                    "goal": plan.goal,
+                    "task_type": plan.task_type,
+                    "agent_mode": agent_mode,
+                },
+            )
         self.state.start_task(
             plan.goal,
             task_type=plan.task_type,
@@ -106,6 +120,19 @@ class Executor(object):
         if plan.message:
             final_result["message"] = plan.message
         self._record_trajectory(final_result)
+        if self.trace_bus:
+            self.trace_bus.emit(
+                stage="executor.done",
+                backend="executor",
+                success=final_result["success"],
+                confidence=1.0 if final_result["success"] else 0.0,
+                reason_summary="Execution completed.",
+                extra={
+                    "goal": plan.goal,
+                    "task_type": plan.task_type,
+                    "step_count": len(step_results),
+                },
+            )
         return final_result
 
     def _execute_step(
@@ -229,6 +256,20 @@ class Executor(object):
                 "fallback_used": bool(data.get("fallback_used", False)),
             },
         )
+        if self.trace_bus:
+            self.trace_bus.emit(
+                stage="executor.step",
+                backend="executor",
+                success=bool(result.get("success")),
+                confidence=1.0 if result.get("success") else 0.0,
+                reason_summary=str(result.get("detail", ""))[:160],
+                fallback_triggered=bool(data.get("fallback_used", False)),
+                extra={
+                    "action": step.skill,
+                    "page": page_name,
+                    "target": target_name,
+                },
+            )
         return result
 
     def _should_attempt_recovery(self, step: PlanStep, result: Dict[str, Any]) -> bool:
@@ -272,9 +313,19 @@ class Executor(object):
                 break
 
             action_step = PlanStep(str(next_action["skill"]), dict(next_action.get("args") or {}))
+            page_before_action = self.state.current_page or (self.state.screen_summary or {}).get("page") or ""
+            app_before_action = self.state.current_app or (self.state.screen_summary or {}).get("app") or ""
             action_result = self._execute_step(action_step, context, next_step_index)
             results.append(action_result)
             next_step_index += 1
+            self._remember_verified_shortcut(
+                plan=plan,
+                reasoning=reasoning,
+                action_step=action_step,
+                action_result=action_result,
+                page_before_action=page_before_action,
+                app_before_action=app_before_action,
+            )
             if not action_result["success"]:
                 break
 
@@ -301,6 +352,38 @@ class Executor(object):
             rounds_completed += 1
 
         return results
+
+    def _remember_verified_shortcut(
+        self,
+        plan: ExecutionPlan,
+        reasoning: Dict[str, Any],
+        action_step: PlanStep,
+        action_result: Dict[str, Any],
+        page_before_action: str,
+        app_before_action: str,
+    ) -> None:
+        if not self.memory:
+            return
+        if plan.task_type != TASK_GUIDED_UI_TASK:
+            return
+        if not action_result.get("success"):
+            return
+        if reasoning.get("requires_confirmation"):
+            return
+        if action_step.skill not in self._interactive_allowed_skills:
+            return
+        args = dict(action_step.args or {})
+        if not args:
+            return
+        self.memory.remember_ui_shortcut(
+            task_type=plan.task_type,
+            app=app_before_action,
+            page=page_before_action,
+            intent=plan.goal,
+            skill=action_step.skill,
+            args=args,
+            confidence=float(reasoning.get("confidence", 0.9)),
+        )
 
     def _validate_interactive_action(
         self,
