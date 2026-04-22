@@ -57,6 +57,8 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan.task_type, "create_reminder")
         self.assertEqual(plan.steps[0].skill, "open_calendar_event")
         self.assertEqual(plan.steps[2].skill, "confirm_action")
+        self.assertEqual(plan.steps[2].args["skip_if_page"], "reminder_saved")
+        self.assertEqual(plan.steps[3].args["skip_if_page"], "reminder_saved")
 
     def test_rule_planner_read_current_screen_flow_is_reasoning_only(self):
         planner = self._build_planner()

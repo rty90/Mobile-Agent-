@@ -219,6 +219,118 @@ class ReasoningOrchestratorTests(unittest.TestCase):
         self.assertEqual(result["decision"].selected_backend, "cloud_reviewer")
         self.assertEqual(calls["vl"], 1)
 
+    def test_cloud_review_skips_screenshot_for_text_model(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        orchestrator.model_runtime.cloud_reviewer_model = lambda: "qwen-plus"
+        screenshot = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        screenshot.write(b"fakepng")
+        screenshot.close()
+        calls = {"text": 0, "vl": 0}
+
+        def fake_text(**kwargs):
+            calls["text"] += 1
+            return json.dumps(
+                {
+                    "decision": "execute",
+                    "task_type": "guided_ui_task",
+                    "skill": None,
+                    "args": {},
+                    "confidence": 0.91,
+                    "requires_confirmation": False,
+                    "reason_summary": "Settings is open and visible.",
+                }
+            )
+
+        def fail_vl(**kwargs):
+            calls["vl"] += 1
+            raise AssertionError("text-only cloud models should not receive screenshots")
+
+        orchestrator._call_openai_compatible_text = fake_text
+        orchestrator._call_openai_compatible_vl = fail_vl
+
+        result = orchestrator.resolve(
+            goal="open settings and inspect the current page",
+            task_type="guided_ui_task",
+            screen_summary={"page": "settings_home", "visible_text": ["Search Settings"], "possible_targets": []},
+            screenshot_path=screenshot.name,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "cloud_reviewer")
+        self.assertEqual(calls["text"], 1)
+        self.assertEqual(calls["vl"], 0)
+
+    def test_read_only_guided_task_uses_cloud_before_local(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("read-only guided tasks should not wait for local text first")
+
+        def fake_review(**kwargs):
+            calls["cloud"] += 1
+            return json.dumps(
+                {
+                    "decision": "execute",
+                    "task_type": "guided_ui_task",
+                    "skill": None,
+                    "args": {},
+                    "confidence": 0.92,
+                    "requires_confirmation": False,
+                    "reason_summary": "Settings is open and visible.",
+                }
+            )
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fake_review
+
+        result = orchestrator.resolve(
+            goal="open settings and inspect the current page",
+            task_type="guided_ui_task",
+            screen_summary={"page": "settings_home", "visible_text": ["Search Settings"], "possible_targets": []},
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "cloud_reviewer")
+        self.assertIsNone(result["decision"].skill)
+        self.assertEqual(calls["cloud"], 1)
+        self.assertEqual(calls["local"], 0)
+
+    def test_read_only_guided_task_suppresses_model_action(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+
+        def fake_review(**kwargs):
+            return json.dumps(
+                {
+                    "decision": "execute",
+                    "task_type": "guided_ui_task",
+                    "skill": "open_app",
+                    "args": {"app_name": "Settings"},
+                    "confidence": 0.93,
+                    "requires_confirmation": False,
+                    "reason_summary": "Settings is already open.",
+                }
+            )
+
+        orchestrator._call_openai_compatible_review = fake_review
+
+        result = orchestrator.resolve(
+            goal="open settings and inspect the current page",
+            task_type="guided_ui_task",
+            screen_summary={"page": "settings_home", "visible_text": ["Search Settings"], "possible_targets": []},
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "cloud_reviewer")
+        self.assertIsNone(result["decision"].skill)
+        self.assertEqual(result["decision"].args, {})
+
     def test_disabled_local_vl_is_skipped(self):
         orchestrator, _trace_path = self._build_orchestrator()
         orchestrator.model_runtime.local_vl_enabled = lambda: False
@@ -277,6 +389,178 @@ class ReasoningOrchestratorTests(unittest.TestCase):
 
         self.assertEqual(result["decision"].selected_backend, "memory_rule")
         self.assertEqual(result["decision"].skill, "tap")
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_affordance_graph_uses_cloud_model_before_memory_shortcut(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"cloud": 0, "local": 0}
+
+        def fake_cloud(**kwargs):
+            calls["cloud"] += 1
+            payload = kwargs["payload"]
+            self.assertIn("affordance_graph", payload)
+            return json.dumps(
+                {
+                    "decision": "execute",
+                    "task_type": "guided_ui_task",
+                    "skill": "tap",
+                    "args": {
+                        "action_id": "tap:n010",
+                        "target_id": "n010",
+                        "target": "Create a note",
+                    },
+                    "confidence": 0.91,
+                    "requires_confirmation": False,
+                    "reason_summary": "Choose the Create a note affordance.",
+                }
+            )
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("local text should not run before model-first cloud affordance selection")
+
+        orchestrator._call_openai_compatible_review = fake_cloud
+        orchestrator._call_openai_compatible_text = fail_local
+
+        screen_summary = {
+            "page": "keep_home",
+            "visible_text": ["Create a note"],
+            "possible_targets": [
+                {"target_id": "n010", "label": "Create a note", "clickable": True}
+            ],
+            "affordance_graph": {
+                "page": "keep_home",
+                "actions": [
+                    {
+                        "action_id": "tap:n010",
+                        "skill": "tap",
+                        "args": {"target_id": "n010", "target": "Create a note"},
+                    }
+                ],
+            },
+        }
+
+        result = orchestrator.resolve(
+            goal="open keep and create a note",
+            task_type="guided_ui_task",
+            screen_summary=screen_summary,
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+            normalized_context={
+                "goal": "open keep and create a note",
+                "task_type": "guided_ui_task",
+                "screen_summary": {"page": "keep_home", "visible_text": ["Create a note"]},
+                "affordance_graph": screen_summary["affordance_graph"],
+                "ui_shortcut": {
+                    "skill": "tap",
+                    "args": {"target": "Sort notes", "target_key": "new_note"},
+                    "confidence": 0.98,
+                },
+            },
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "cloud_reviewer")
+        self.assertEqual(result["decision"].args["target_id"], "n010")
+        self.assertEqual(calls["cloud"], 1)
+        self.assertEqual(calls["local"], 0)
+
+    def test_keep_create_note_stops_once_editor_is_open(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed once the editor is open")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed once the editor is open")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open keep and create a note",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_editor",
+                "visible_text": ["Title", "Note"],
+                "possible_targets": [
+                    {"label": "Title", "resource_id": "editable_title", "clickable": True},
+                    {"label": "Note", "resource_id": "edit_note_text", "clickable": True},
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+            normalized_context={
+                "goal": "open keep and create a note",
+                "task_type": "guided_ui_task",
+                "screen_summary": {"page": "keep_editor", "visible_text": ["Title", "Note"]},
+                "recent_actions": [],
+                "relevant_memories": [],
+                "ui_shortcut": {
+                    "skill": "tap",
+                    "args": {"target": "Title", "target_key": "editable_title"},
+                    "confidence": 0.95,
+                },
+            },
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertIsNone(result["decision"].skill)
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_keep_create_note_with_requested_text_types_in_editor(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed to type requested editor text")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed to type requested editor text")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open keep and create a note, then type 'agent smoke test'",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_editor",
+                "visible_text": ["Title", "Note"],
+                "possible_targets": [
+                    {
+                        "label": "Note",
+                        "resource_id": "com.google.android.keep:id/edit_note_text",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "target_id": "n013",
+                    }
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+            normalized_context={
+                "goal": "open keep and create a note, then type 'agent smoke test'",
+                "task_type": "guided_ui_task",
+                "screen_summary": {"page": "keep_editor", "visible_text": ["Title", "Note"]},
+                "recent_actions": [],
+                "relevant_memories": [],
+            },
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertEqual(result["decision"].skill, "type_text")
+        self.assertEqual(result["decision"].args["text"], "agent smoke test")
+        self.assertEqual(result["decision"].args["target_id"], "n013")
         self.assertEqual(calls["local"], 0)
         self.assertEqual(calls["cloud"], 0)
 

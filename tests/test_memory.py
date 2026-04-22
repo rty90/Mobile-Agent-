@@ -90,7 +90,124 @@ class MemoryTests(unittest.TestCase):
 
         self.assertEqual(matched["skill"], "tap")
         self.assertEqual(matched["args"]["target_key"], "new_note")
-        self.assertEqual(missing["skill"], "tap")
+        self.assertIsNone(missing)
+
+    def test_ui_shortcut_tap_requires_clickable_visible_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            memory.remember_ui_shortcut(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                page="keep_home",
+                intent="open keep and create a note",
+                skill="tap",
+                args={
+                    "target": "Keep Notes needs permission to send notifications for reminders",
+                    "target_key": "android:id/message",
+                },
+                confidence=0.95,
+            )
+
+            matched = memory.find_ui_shortcut(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                page="keep_home",
+                intent="open keep and create a note",
+                screen_summary={
+                    "page": "keep_home",
+                    "visible_text": [
+                        "Keep Notes needs permission to send notifications for reminders",
+                        "Cancel",
+                    ],
+                    "possible_targets": [
+                        {
+                            "label": "Keep Notes needs permission to send notifications for reminders",
+                            "resource_id": "android:id/message",
+                            "clickable": False,
+                        },
+                        {
+                            "label": "Cancel",
+                            "resource_id": "android:id/button2",
+                            "clickable": True,
+                        },
+                    ],
+                },
+            )
+
+        self.assertIsNone(matched)
+
+    def test_ui_shortcut_rejects_new_note_alias_pointing_to_sort_notes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            memory.remember_ui_shortcut(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                page="keep_home",
+                intent="open keep and create a note",
+                skill="tap",
+                args={"target": "Sort notes", "target_key": "new_note", "prefer_fallback": True},
+                confidence=0.75,
+            )
+
+            matched = memory.find_ui_shortcut(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                page="keep_home",
+                intent="open keep and create a note",
+                screen_summary={
+                    "page": "keep_home",
+                    "visible_text": ["Sort notes", "Create a note"],
+                    "possible_targets": [
+                        {"label": "Sort notes", "resource_id": "menu_sort_order", "clickable": True},
+                        {
+                            "label": "Create a note",
+                            "resource_id": "speed_dial_create_close_button",
+                            "content_desc": "Create a note",
+                            "clickable": True,
+                        },
+                    ],
+                },
+            )
+
+        self.assertIsNone(matched)
+
+    def test_ui_shortcut_short_text_target_does_not_match_existing_text_note(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            memory.remember_ui_shortcut(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                page="keep_home",
+                intent="open keep and create a note",
+                skill="tap",
+                args={"target": "Text"},
+                confidence=0.95,
+            )
+
+            matched = memory.find_ui_shortcut(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                page="keep_home",
+                intent="open keep and create a note",
+                screen_summary={
+                    "page": "keep_home",
+                    "visible_text": ["Text note. ZX-2048.", "Create a note"],
+                    "possible_targets": [
+                        {
+                            "label": "Text note. ZX-2048.",
+                            "resource_id": "com.google.android.keep:id/browse_text_note",
+                            "clickable": True,
+                        },
+                        {
+                            "label": "Create a note",
+                            "resource_id": "com.google.android.keep:id/speed_dial_create_close_button",
+                            "clickable": True,
+                        },
+                    ],
+                },
+            )
+
+        self.assertIsNone(matched)
 
 
 if __name__ == "__main__":

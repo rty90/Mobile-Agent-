@@ -82,6 +82,8 @@ def _normalize_args(payload: Dict[str, Any], skill: Optional[str]) -> Dict[str, 
     if skill == "tap":
         _copy_if_present(normalized, payload, "target")
         _copy_if_present(normalized, payload, "target_key")
+        _copy_if_present(normalized, payload, "target_id")
+        _copy_if_present(normalized, payload, "action_id")
         _copy_if_present(normalized, payload, "resource_id")
         _copy_if_present(normalized, payload, "bounds")
         _copy_if_present(normalized, payload, "prefer_fallback")
@@ -95,6 +97,9 @@ def _normalize_args(payload: Dict[str, Any], skill: Optional[str]) -> Dict[str, 
             if value:
                 normalized["app_name"] = value
     elif skill == "type_text":
+        _copy_if_present(normalized, payload, "target")
+        _copy_if_present(normalized, payload, "target_id")
+        _copy_if_present(normalized, payload, "action_id")
         if "text" not in normalized:
             value = payload.get("text") or payload.get("value") or payload.get("input")
             if value is not None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from app.affordances import build_affordance_graph
 from app.memory import SQLiteMemory
 from app.reminder_parser import parse_reminder_task
 from app.state import AgentState
@@ -58,6 +59,13 @@ class ContextBuilder(object):
             if len(targets) >= limit:
                 break
         return targets
+
+    @staticmethod
+    def _affordance_graph(summary: Dict[str, Any]) -> Dict[str, Any]:
+        graph = summary.get("affordance_graph")
+        if isinstance(graph, dict) and isinstance(graph.get("actions"), list):
+            return graph
+        return build_affordance_graph(summary)
 
     def _build_memories(
         self,
@@ -125,6 +133,7 @@ class ContextBuilder(object):
             "screen_summary": self._trim_screen_summary(state.screen_summary or {}, resolved_task_type),
             "visible_text_excerpt": list((state.screen_summary or {}).get("visible_text", []))[:8],
             "top_targets": self._top_targets(state.screen_summary or {}),
+            "affordance_graph": self._affordance_graph(state.screen_summary or {}),
             "recent_actions": state.recent_action_context(limit=2),
             "relevant_memories": self._build_memories(resolved_task_type, goal, current_app),
             "ui_shortcut": self._build_ui_shortcut(goal, state, resolved_task_type),
@@ -181,6 +190,7 @@ class ContextBuilder(object):
             "screen_summary": context.get("screen_summary"),
             "visible_text_excerpt": context.get("visible_text_excerpt", []),
             "top_targets": context.get("top_targets", []),
+            "affordance_graph": context.get("affordance_graph", {}),
             "recent_actions": context.get("recent_actions", []),
             "relevant_memories": context.get("relevant_memories", []),
             "ui_shortcut": context.get("ui_shortcut"),

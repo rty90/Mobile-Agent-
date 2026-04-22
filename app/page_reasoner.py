@@ -15,6 +15,7 @@ from app.task_types import (
     TASK_READ_CURRENT_SCREEN,
     TASK_SEND_MESSAGE,
     contains_high_risk_keyword,
+    extract_message_body,
     parse_extract_task,
     parse_guided_ui_task,
     parse_screen_read_task,
@@ -75,6 +76,29 @@ def _first_target_label(screen_summary: Dict[str, Any], keywords: List[str]) -> 
         if label and any(keyword in lowered for keyword in keywords):
             return label
     return None
+
+
+def _keep_create_note_target(screen_summary: Dict[str, Any]) -> Optional[str]:
+    preferred_matches = []
+    fallback_matches = []
+    for candidate in screen_summary.get("possible_targets", []):
+        if not isinstance(candidate, dict) or not bool(candidate.get("clickable")):
+            continue
+        label = str(candidate.get("label") or "").strip()
+        content_desc = str(candidate.get("content_desc") or "").strip()
+        resource_id = str(candidate.get("resource_id") or "").strip()
+        combined = " ".join([label, content_desc, resource_id]).lower()
+        if not label and not content_desc:
+            continue
+        if "sort note" in combined or "browse_text_note" in combined or "browse_list_note" in combined:
+            continue
+        display_label = label or content_desc
+        if "new_note_button" in combined or "new text note" in combined:
+            preferred_matches.append(display_label)
+            continue
+        if "take a note" in combined or "create a note" in combined:
+            fallback_matches.append(display_label)
+    return (preferred_matches or fallback_matches or [None])[0]
 
 
 def _is_read_only_guided_request(goal: str) -> bool:
@@ -160,17 +184,38 @@ class RuleBasedPageReasoner(object):
                 labels.append(str(item.get("label", "")).lower())
             else:
                 labels.append(str(item).lower())
+        labels.extend(str(item).lower() for item in screen_summary.get("visible_text", []))
         guided_request = parse_guided_ui_task(goal)
 
         if _is_read_only_guided_request(goal):
             return None
 
-        if page == "keep_home" and any("note" in label for label in labels):
-            note_label = _first_target_label(screen_summary, ["take a note", "create a note", "new text note", "note"])
+        if page == "keep_home" and any("get started" in label for label in labels):
             return {
                 "skill": "tap",
                 "args": {
-                    "target": note_label or "create a note",
+                    "target": "Get started",
+                },
+            }
+
+        if page == "keep_home" and any("needs permission to send notifications" in label for label in labels):
+            return {
+                "skill": "tap",
+                "args": {
+                    "target": "Cancel",
+                },
+            }
+
+        if page == "keep_home":
+            note_label = _keep_create_note_target(screen_summary)
+            if not note_label and not any("note" in label for label in labels):
+                note_label = None
+            if not note_label:
+                return None
+            return {
+                "skill": "tap",
+                "args": {
+                    "target": note_label,
                     "target_key": "new_note",
                     "prefer_fallback": True,
                 },
@@ -186,6 +231,27 @@ class RuleBasedPageReasoner(object):
             }
 
         if page == "keep_editor":
+            text = extract_message_body(goal)
+            if text and not any(text.lower() in label for label in labels):
+                for target in screen_summary.get("possible_targets", []):
+                    if not isinstance(target, dict):
+                        continue
+                    combined = " ".join(
+                        str(target.get(key) or "").lower()
+                        for key in ("label", "resource_id", "content_desc", "class_name")
+                    )
+                    if "edit_note_text" in combined or combined.strip() == "note":
+                        args = {
+                            "target": target.get("label") or "Note",
+                            "text": text,
+                        }
+                        if target.get("target_id"):
+                            args["target_id"] = target["target_id"]
+                            args["action_id"] = "type:{0}".format(target["target_id"])
+                        return {
+                            "skill": "type_text",
+                            "args": args,
+                        }
             return None
 
         if guided_request.get("target_package") and not screen_summary.get("app"):

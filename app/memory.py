@@ -205,18 +205,81 @@ class SQLiteMemory(object):
         return True
 
     @staticmethod
-    def _screen_has_target(screen_summary: Dict[str, Any], target_label: str) -> bool:
+    def _target_matches(candidate: Dict[str, Any], target_label: str) -> bool:
+        lowered = (target_label or "").strip().lower()
+        if not lowered:
+            return False
+        values = [
+            candidate.get("label"),
+            candidate.get("resource_id"),
+            candidate.get("content_desc"),
+        ]
+        for value in values:
+            text = str(value or "").strip().lower()
+            if not text:
+                continue
+            if text == lowered:
+                return True
+            if len(lowered) <= 4:
+                continue
+            if lowered in text or text in lowered:
+                return True
+        return False
+
+    @staticmethod
+    def _target_key_alias_matches(candidate: Dict[str, Any], target_key: str) -> bool:
+        alias = (target_key or "").strip().lower()
+        if alias != "new_note":
+            return True
+        values = [
+            candidate.get("label"),
+            candidate.get("resource_id"),
+            candidate.get("content_desc"),
+        ]
+        combined = " ".join(str(value or "").strip().lower() for value in values)
+        if "sort note" in combined or "browse_text_note" in combined or "browse_list_note" in combined:
+            return False
+        return any(
+            marker in combined
+            for marker in (
+                "create a note",
+                "take a note",
+                "new text note",
+                "new_note_button",
+            )
+        )
+
+    @classmethod
+    def _screen_has_target(cls, screen_summary: Dict[str, Any], target_label: str) -> bool:
         lowered = (target_label or "").strip().lower()
         if not lowered:
             return False
         for item in screen_summary.get("possible_targets", []):
-            label = str((item or {}).get("label") or "").strip().lower()
-            if label and (label == lowered or lowered in label or label in lowered):
+            if cls._target_matches(item or {}, lowered):
                 return True
         for item in screen_summary.get("visible_text", []):
             text = str(item).strip().lower()
             if text and (text == lowered or lowered in text or text in lowered):
                 return True
+        return False
+
+    @classmethod
+    def _screen_has_clickable_target(
+        cls,
+        screen_summary: Dict[str, Any],
+        target_label: str,
+        target_key: str = "",
+    ) -> bool:
+        candidates = [target_label, target_key]
+        for item in screen_summary.get("possible_targets", []):
+            candidate = item or {}
+            if not bool(candidate.get("clickable")):
+                continue
+            if target_key and not cls._target_key_alias_matches(candidate, target_key):
+                continue
+            for target in candidates:
+                if cls._target_matches(candidate, target):
+                    return True
         return False
 
     def find_ui_shortcut(
@@ -247,15 +310,20 @@ class SQLiteMemory(object):
         summary = screen_summary or {}
         for row in rows:
             args = json.loads(row[4]) if row[4] else {}
+            skill = row[3]
             target_label = row[5] or str(args.get("target") or "").strip()
             target_key = row[6] or str(args.get("target_key") or "").strip()
-            if target_label and not self._screen_has_target(summary, target_label) and not target_key:
+            if skill == "tap" and not self._screen_has_clickable_target(summary, target_label, target_key):
+                continue
+            if target_label and not self._screen_has_target(summary, target_label):
+                continue
+            if not target_label and target_key and not self._screen_has_target(summary, target_key):
                 continue
             return {
                 "app": row[0],
                 "page": row[1],
                 "intent_key": row[2],
-                "skill": row[3],
+                "skill": skill,
                 "args": args,
                 "target_label": target_label,
                 "target_key": target_key,

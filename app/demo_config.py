@@ -67,6 +67,19 @@ def build_demo_message_config(
                     "send": (0.92, 0.94),
                 },
             ),
+            "settings_home": PageProfile(
+                name="settings_home",
+                keywords=(
+                    "search settings",
+                    "network & internet",
+                    "connected devices",
+                    "apps",
+                    "notifications",
+                    "storage",
+                ),
+                app_hints=("com.android.settings",),
+                fallback_targets={},
+            ),
             "keep_home": PageProfile(
                 name="keep_home",
                 keywords=("keep", "notes", "take a note", "create a note", "new text note"),

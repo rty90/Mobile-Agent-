@@ -11,7 +11,7 @@ from app.model_runtime import ModelRuntime
 from app.reasoning_validator import ReasoningValidator
 from app.schemas.reasoning_decision import ReasoningDecision
 from app.trace_bus import TraceBus
-from app.task_types import TASK_GUIDED_UI_TASK
+from app.task_types import TASK_GUIDED_UI_TASK, extract_message_body
 
 
 class ReasoningOrchestrator(object):
@@ -22,6 +22,9 @@ class ReasoningOrchestrator(object):
         "Allowed skills: open_app, tap, swipe, type_text, back, wait, search_in_app. "
         "Never output shell commands, adb commands, or raw chain-of-thought. "
         "Use skill=null only when the task is read-only and no action is needed. "
+        "When affordance_graph.actions is present, choose one listed action whenever possible. "
+        "For tap/type actions selected from affordance_graph, copy its action_id and target_id into args. "
+        "Do not invent labels or coordinates when a matching action_id exists. "
         "Output exactly one JSON object with these top-level keys only: "
         "decision, task_type, skill, args, confidence, requires_confirmation, reason_summary. "
         "args must always be an object, even when empty. "
@@ -30,7 +33,7 @@ class ReasoningOrchestrator(object):
         "For a tap action, use skill='tap' and put target details inside args. "
         "For a read-only task, return decision='execute', skill=null, args={}. "
         "Example action output: "
-        "{\"decision\":\"execute\",\"task_type\":\"guided_ui_task\",\"skill\":\"tap\",\"args\":{\"target\":\"Create a note\",\"target_key\":\"new_note\"},\"confidence\":0.90,\"requires_confirmation\":false,\"reason_summary\":\"The Create a note target is visible.\"} "
+        "{\"decision\":\"execute\",\"task_type\":\"guided_ui_task\",\"skill\":\"tap\",\"args\":{\"action_id\":\"tap:n012\",\"target_id\":\"n012\",\"target\":\"Create a note\"},\"confidence\":0.90,\"requires_confirmation\":false,\"reason_summary\":\"The Create a note action is visible.\"} "
         "Example read-only output: "
         "{\"decision\":\"execute\",\"task_type\":\"guided_ui_task\",\"skill\":null,\"args\":{},\"confidence\":0.82,\"requires_confirmation\":false,\"reason_summary\":\"The current page is a Keep home screen with visible notes.\"}"
     )
@@ -70,6 +73,49 @@ class ReasoningOrchestrator(object):
             recent_actions=recent_actions,
             relevant_memories=relevant_memories,
         )
+        context_payload = dict(context_payload)
+        context_payload["_validation_screen_summary"] = screen_summary
+        context_payload.setdefault("affordance_graph", screen_summary.get("affordance_graph") or {})
+        context_payload.setdefault(
+            "required_output_schema",
+            {
+                "decision": "execute | cloud_review | vl_review | unsupported",
+                "task_type": task_type,
+                "skill": "open_app | tap | swipe | type_text | back | wait | search_in_app | null",
+                "args": "object; for affordance actions include action_id and target_id",
+                "confidence": "float between 0.0 and 1.0",
+                "requires_confirmation": "boolean",
+                "reason_summary": "short string",
+            },
+        )
+        context_payload.setdefault(
+            "forbidden_top_level_keys",
+            ["action", "target", "resource_id", "bounds", "step", "explanation"],
+        )
+
+        editor_type_decision = self._guided_keep_editor_type_decision(goal, task_type, screen_summary)
+        if editor_type_decision:
+            return self._finish(editor_type_decision, screen_summary)
+
+        if self._guided_goal_already_complete(goal, task_type, screen_summary):
+            decision = ReasoningDecision(
+                decision="execute",
+                task_type=task_type,
+                skill=None,
+                args={},
+                confidence=0.90,
+                requires_confirmation=False,
+                reason_summary="The requested guided UI task is already complete on the current page.",
+                validation_errors=[],
+                selected_backend="rule",
+                fallback_used=True,
+            )
+            return self._finish(decision, screen_summary)
+
+        if self._should_use_model_first_action(task_type, context_payload):
+            cloud_result = self._resolve_cloud_review(goal, task_type, context_payload, screenshot_path)
+            if self._is_resolved(cloud_result["decision"], goal, task_type):
+                return self._finish(cloud_result["decision"], screen_summary)
 
         shortcut_result = self._resolve_memory_shortcut(
             goal=goal,
@@ -79,13 +125,19 @@ class ReasoningOrchestrator(object):
         if self._is_resolved(shortcut_result["decision"], goal, task_type):
             return self._finish(shortcut_result["decision"], screen_summary)
 
+        if self._should_use_cloud_first(goal, task_type):
+            cloud_result = self._resolve_cloud_review(goal, task_type, context_payload, screenshot_path)
+            if self._is_resolved(cloud_result["decision"], goal, task_type):
+                return self._finish(cloud_result["decision"], screen_summary)
+
         local_text_result = self._resolve_local_text(goal, task_type, context_payload)
         if self._is_resolved(local_text_result["decision"], goal, task_type):
             return self._finish(local_text_result["decision"], screen_summary)
 
-        cloud_result = self._resolve_cloud_review(goal, task_type, context_payload, screenshot_path)
-        if self._is_resolved(cloud_result["decision"], goal, task_type):
-            return self._finish(cloud_result["decision"], screen_summary)
+        if not self._should_use_cloud_first(goal, task_type):
+            cloud_result = self._resolve_cloud_review(goal, task_type, context_payload, screenshot_path)
+            if self._is_resolved(cloud_result["decision"], goal, task_type):
+                return self._finish(cloud_result["decision"], screen_summary)
 
         local_vl_result = self._resolve_local_vl(goal, task_type, context_payload, screenshot_path)
         if self._is_resolved(local_vl_result["decision"], goal, task_type):
@@ -285,6 +337,18 @@ class ReasoningOrchestrator(object):
         lowered = str(exc).strip().lower()
         if isinstance(exc, TimeoutError) or "timed out" in lowered or "timeout" in lowered:
             self._local_text_degraded = True
+
+    def _should_use_cloud_first(self, goal: str, task_type: str) -> bool:
+        if not self.model_runtime.cloud_reviewer_configured():
+            return False
+        if task_type == TASK_GUIDED_UI_TASK and self._is_read_only_guided_request(goal):
+            return True
+        return str(os.environ.get("REASONING_CLOUD_FIRST", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     def _resolve_cloud_review(
         self,
@@ -556,11 +620,12 @@ class ReasoningOrchestrator(object):
             "recent_actions": recent_actions or [],
             "relevant_memories": relevant_memories or [],
             "ui_shortcut": None,
+            "affordance_graph": screen_summary.get("affordance_graph") or {},
             "required_output_schema": {
                 "decision": "execute | cloud_review | vl_review | unsupported",
                 "task_type": task_type,
                 "skill": "open_app | tap | swipe | type_text | back | wait | search_in_app | null",
-                "args": "object",
+                "args": "object; for affordance actions include action_id and target_id",
                 "confidence": "float between 0.0 and 1.0",
                 "requires_confirmation": "boolean",
                 "reason_summary": "short string",
@@ -581,8 +646,38 @@ class ReasoningOrchestrator(object):
         goal: str,
         task_type: str,
     ) -> bool:
+        self._normalize_read_only_decision(decision, goal, task_type)
         require_action = task_type == TASK_GUIDED_UI_TASK and not self._is_read_only_guided_request(goal)
         return self.validator.is_strong_decision(decision, require_action=require_action)
+
+    def _should_use_model_first_action(self, task_type: str, context_payload: Dict[str, Any]) -> bool:
+        if task_type != TASK_GUIDED_UI_TASK:
+            return False
+        if not self.model_runtime.cloud_reviewer_configured():
+            return False
+        override = str(os.environ.get("REASONING_MODEL_FIRST_ACTIONS", "")).strip().lower()
+        if override in {"0", "false", "no", "off"}:
+            return False
+        graph = context_payload.get("affordance_graph")
+        if not isinstance(graph, dict):
+            return False
+        actions = graph.get("actions")
+        return isinstance(actions, list) and bool(actions)
+
+    def _normalize_read_only_decision(
+        self,
+        decision: ReasoningDecision,
+        goal: str,
+        task_type: str,
+    ) -> None:
+        if task_type != TASK_GUIDED_UI_TASK:
+            return
+        if not self._is_read_only_guided_request(goal):
+            return
+        if decision.decision != "execute":
+            return
+        decision.skill = None
+        decision.args = {}
 
     @staticmethod
     def _is_read_only_guided_request(goal: str) -> bool:
@@ -599,6 +694,80 @@ class ReasoningOrchestrator(object):
                 "read the current screen",
                 "read the current page",
             )
+        )
+
+    @staticmethod
+    def _guided_goal_already_complete(
+        goal: str,
+        task_type: str,
+        screen_summary: Dict[str, Any],
+    ) -> bool:
+        if task_type != TASK_GUIDED_UI_TASK:
+            return False
+        normalized = (goal or "").strip().lower()
+        page = str((screen_summary or {}).get("page") or "").strip().lower()
+        requested_text = extract_message_body(goal)
+        if requested_text:
+            visible_text = " ".join(str(item).lower() for item in (screen_summary or {}).get("visible_text", []))
+            if requested_text.lower() not in visible_text:
+                return False
+        if page == "keep_editor" and "keep" in normalized and (
+            "create a note" in normalized
+            or "create a text note" in normalized
+            or "new note" in normalized
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _guided_keep_editor_type_decision(
+        goal: str,
+        task_type: str,
+        screen_summary: Dict[str, Any],
+    ) -> Optional[ReasoningDecision]:
+        if task_type != TASK_GUIDED_UI_TASK:
+            return None
+        page = str((screen_summary or {}).get("page") or "").strip().lower()
+        if page != "keep_editor":
+            return None
+        text = extract_message_body(goal)
+        if not text:
+            return None
+        visible_text = " ".join(str(item).lower() for item in (screen_summary or {}).get("visible_text", []))
+        if text.lower() in visible_text:
+            return None
+
+        best_target: Dict[str, Any] = {}
+        for target in (screen_summary or {}).get("possible_targets", []):
+            if not isinstance(target, dict):
+                continue
+            combined = " ".join(
+                str(target.get(key) or "").lower()
+                for key in ("label", "resource_id", "content_desc", "class_name")
+            )
+            if "edit_note_text" in combined or combined.strip() == "note":
+                best_target = target
+                break
+
+        args: Dict[str, Any] = {"text": text}
+        if best_target:
+            args["target"] = best_target.get("label") or "Note"
+            target_id = best_target.get("target_id")
+            if target_id:
+                args["target_id"] = target_id
+                args["action_id"] = "type:{0}".format(target_id)
+
+        return ReasoningDecision(
+            decision="execute",
+            task_type=task_type,
+            skill="type_text",
+            args=args,
+            confidence=0.92,
+            requires_confirmation=False,
+            reason_summary="The Keep editor is open; type the requested note text.",
+            validation_errors=[],
+            selected_backend="rule",
+            fallback_used=True,
         )
 
     def _weak_reason(
@@ -684,7 +853,7 @@ class ReasoningOrchestrator(object):
         screenshot_path: Optional[str],
     ) -> Any:
         screenshot_file = Path(str(screenshot_path)) if screenshot_path else None
-        if screenshot_file and screenshot_file.exists():
+        if screenshot_file and screenshot_file.exists() and self._cloud_review_uses_screenshot(model_name):
             return self._call_openai_compatible_vl(
                 base_url=base_url,
                 api_key=api_key,
@@ -698,6 +867,16 @@ class ReasoningOrchestrator(object):
             model_name=model_name,
             payload=payload,
         )
+
+    @staticmethod
+    def _cloud_review_uses_screenshot(model_name: str) -> bool:
+        override = str(os.environ.get("REASONING_CLOUD_REVIEW_SCREENSHOT", "")).strip().lower()
+        if override in {"1", "true", "yes", "on"}:
+            return True
+        if override in {"0", "false", "no", "off"}:
+            return False
+        normalized = (model_name or "").strip().lower()
+        return "vl" in normalized or "vision" in normalized or normalized == "qwen3.5-plus"
 
     @staticmethod
     def _build_data_url(screenshot_path: str) -> str:

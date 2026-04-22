@@ -276,12 +276,19 @@ class RuleBasedPlanner(object):
                     },
                 ),
                 PlanStep("read_screen", {"prefix": "reminder_editor"}),
-                PlanStep("confirm_action", {"prompt": "Confirm before saving the reminder?"}),
+                PlanStep(
+                    "confirm_action",
+                    {
+                        "prompt": "Confirm before saving the reminder?",
+                        "skip_if_page": "reminder_saved",
+                    },
+                ),
                 PlanStep(
                     "tap",
                     {
                         "target": "save",
                         "target_key": "save",
+                        "skip_if_page": "reminder_saved",
                     },
                 ),
                 PlanStep("read_screen", {"prefix": "reminder_saved"}),

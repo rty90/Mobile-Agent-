@@ -259,6 +259,31 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(adb.calendar_history[0]["title"], "buy milk")
         self.assertEqual(state.current_page, "reminder_saved")
 
+    def test_create_reminder_flow_skips_save_when_intent_already_saved(self):
+        class ImmediateSaveADB(MockADB):
+            def start_calendar_event_intent(self, title, begin_time_ms=None, package_name=None, wait_time=1.0):
+                super().start_calendar_event_intent(title, begin_time_ms, package_name, wait_time)
+                self.current_screen = "reminder_saved"
+
+        adb = ImmediateSaveADB(
+            {
+                "reminder_editor": REMINDER_EDITOR_XML,
+                "reminder_saved": REMINDER_SAVED_XML,
+            },
+            initial_screen="reminder_saved",
+        )
+        memory = self._build_memory("executor_reminder_already_saved.db")
+        executor, state = self._build_executor(adb, memory, "test-agent-reminder-already-saved")
+        planner = RuleBasedPlanner(demo_config=build_demo_message_config())
+        plan = planner.plan("create a reminder for buy milk at 7pm", {})
+
+        result = executor.execute_plan(plan)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(state.current_page, "reminder_saved")
+        self.assertTrue(result["steps"][2]["data"]["skipped"])
+        self.assertTrue(result["steps"][3]["data"]["skipped"])
+
     def test_guided_ui_task_read_only_request_stops_after_reasoning(self):
         adb = MockADB(
             {

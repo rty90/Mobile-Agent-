@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
+from app.affordances import build_affordance_graph
 from app.demo_config import DemoMessageConfig
 from app.skills.base import BaseSkill, SkillContext
 from app.skills.targeting import normalize_text
@@ -95,6 +96,7 @@ def read_screen_summary(
         candidate = _build_candidate(node)
         if not candidate:
             continue
+        candidate["target_id"] = "n{0:03d}".format(len(possible_targets) + 1)
         visible_text.append(candidate["label"])
         possible_targets.append(candidate)
 
@@ -104,7 +106,7 @@ def read_screen_summary(
         app_name = focus.split()[0].split("/")[-1]
 
     detected_page = detect_page_name(visible_text, focus, runtime_config)
-    return {
+    summary = {
         "app": app_name,
         "page": detected_page or Path(str(dump_path)).stem,
         "visible_text": visible_text[:50],
@@ -112,6 +114,8 @@ def read_screen_summary(
         "focus": focus,
         "ui_dump_path": str(dump_path),
     }
+    summary["affordance_graph"] = build_affordance_graph(summary)
+    return summary
 
 
 class ReadScreenSkill(BaseSkill):

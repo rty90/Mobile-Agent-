@@ -57,6 +57,97 @@ class PageReasonerTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["skill"], "tap")
         self.assertEqual(result["next_action"]["args"]["target"], "Create a note")
 
+    def test_rule_reasoner_does_not_pick_sort_notes_for_create_note(self):
+        reasoner = PageReasoner(backend="rule")
+        result = reasoner.reason(
+            goal="open keep and create a note",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_home",
+                "visible_text": ["Search Keep", "Sort notes", "Create a note"],
+                "possible_targets": [
+                    {"label": "Sort notes", "clickable": True, "confidence": 0.85},
+                    {
+                        "label": "Create a note",
+                        "content_desc": "Create a note",
+                        "resource_id": "com.google.android.keep:id/speed_dial_create_close_button",
+                        "clickable": True,
+                        "confidence": 0.85,
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(result["next_action"]["skill"], "tap")
+        self.assertEqual(result["next_action"]["args"]["target"], "Create a note")
+
+    def test_rule_reasoner_selects_speed_dial_text_note_option(self):
+        reasoner = PageReasoner(backend="rule")
+        result = reasoner.reason(
+            goal="open keep and create a note",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_home",
+                "visible_text": ["Audio", "Image", "Drawing", "List", "Text"],
+                "possible_targets": [
+                    {
+                        "label": "Text",
+                        "content_desc": "New text note",
+                        "resource_id": "com.google.android.keep:id/new_note_button",
+                        "clickable": True,
+                        "confidence": 0.95,
+                    },
+                    {
+                        "label": "Close",
+                        "content_desc": "Close",
+                        "resource_id": "com.google.android.keep:id/speed_dial_create_close_button",
+                        "clickable": True,
+                        "confidence": 0.85,
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(result["next_action"]["skill"], "tap")
+        self.assertEqual(result["next_action"]["args"]["target"], "Text")
+
+    def test_rule_reasoner_dismisses_keep_onboarding(self):
+        reasoner = PageReasoner(backend="rule")
+        result = reasoner.reason(
+            goal="open keep and create a note",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_home",
+                "visible_text": ["Capture anything", "Get started"],
+                "possible_targets": [{"label": "Get started", "clickable": True, "confidence": 0.95}],
+            },
+        )
+
+        self.assertEqual(result["next_action"]["skill"], "tap")
+        self.assertEqual(result["next_action"]["args"]["target"], "Get started")
+
+    def test_rule_reasoner_dismisses_keep_notification_prompt(self):
+        reasoner = PageReasoner(backend="rule")
+        result = reasoner.reason(
+            goal="open keep and create a note",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_home",
+                "visible_text": [
+                    "Keep Notes needs permission to send notifications for reminders and for notes shared with you",
+                    "Cancel",
+                    "Continue",
+                ],
+                "possible_targets": [
+                    {"label": "Cancel", "clickable": True, "confidence": 0.95},
+                    {"label": "Continue", "clickable": True, "confidence": 0.95},
+                ],
+            },
+        )
+
+        self.assertEqual(result["next_action"]["skill"], "tap")
+        self.assertEqual(result["next_action"]["args"]["target"], "Cancel")
+
     def test_rule_reasoner_does_not_click_for_read_only_guided_request(self):
         reasoner = PageReasoner(backend="rule")
         result = reasoner.reason(
@@ -111,6 +202,30 @@ class PageReasonerTests(unittest.TestCase):
         self.assertEqual(result["next_action"]["skill"], "tap")
         self.assertEqual(result["selected_backend"], "local_text")
         self.assertEqual(result["trace_path"], "data/logs/reasoning_trace.jsonl")
+
+    def test_rule_reasoner_types_requested_text_in_keep_editor(self):
+        reasoner = PageReasoner(backend="rule")
+        result = reasoner.reason(
+            goal="open keep and create a note, then type 'agent smoke test'",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "keep_editor",
+                "visible_text": ["Title", "Note"],
+                "possible_targets": [
+                    {
+                        "label": "Note",
+                        "resource_id": "com.google.android.keep:id/edit_note_text",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "target_id": "n013",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["next_action"]["skill"], "type_text")
+        self.assertEqual(result["next_action"]["args"]["text"], "agent smoke test")
+        self.assertEqual(result["next_action"]["args"]["target_id"], "n013")
 
 
 if __name__ == "__main__":

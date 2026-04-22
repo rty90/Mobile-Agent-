@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional
 
+from app.affordances import find_candidate_by_target_id
 from app.skills.base import BaseSkill, SkillContext
 from app.skills.read_screen import read_screen_summary
 from app.skills.targeting import find_fallback_target, find_semantic_target
@@ -24,10 +25,6 @@ class TapSkill(BaseSkill):
                 data={"target": {"center_x": x, "center_y": y}, "fallback_used": False},
             )
 
-        target = args.get("target")
-        if not target:
-            return self.result(success=False, detail="Tap requires x/y or target.")
-
         summary = context.state.screen_summary or read_screen_summary(
             context.adb,
             "data/tmp/tap_lookup.xml",
@@ -37,7 +34,23 @@ class TapSkill(BaseSkill):
 
         fallback_used = False
         candidate = None
-        if args.get("prefer_fallback") and args.get("target_key"):
+        target_id = args.get("target_id")
+        if not target_id and isinstance(args.get("action_id"), str) and str(args.get("action_id")).startswith("tap:"):
+            target_id = str(args.get("action_id")).split(":", 1)[1]
+        if target_id:
+            candidate = find_candidate_by_target_id(summary, str(target_id))
+            if candidate and not candidate.get("clickable"):
+                return self.result(
+                    success=False,
+                    detail="Tap target_id is not clickable: {0}".format(target_id),
+                    data={"fallback_used": False, "target_id": target_id},
+                )
+
+        target = args.get("target") or (candidate or {}).get("label")
+        if not target:
+            return self.result(success=False, detail="Tap requires x/y, target_id, or target.")
+
+        if not candidate and args.get("prefer_fallback") and args.get("target_key"):
             candidate = find_fallback_target(
                 context.runtime_config,
                 context.state.current_page or summary.get("page", ""),
