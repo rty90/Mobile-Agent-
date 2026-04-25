@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.reasoning_orchestrator import ReasoningOrchestrator
 from app.reasoning_validator import ReasoningValidator
@@ -563,6 +564,305 @@ class ReasoningOrchestratorTests(unittest.TestCase):
         self.assertEqual(result["decision"].args["target_id"], "n013")
         self.assertEqual(calls["local"], 0)
         self.assertEqual(calls["cloud"], 0)
+
+    def test_focused_browser_search_prefers_search_intent_before_model_calls(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed when a focused search input is already available")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed when a focused search input is already available")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open chrome, open bilibili, and find videos about llm",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "messages_search",
+                "visible_text": ["Search or type URL"],
+                "possible_targets": [
+                    {
+                        "label": "Search or type URL",
+                        "resource_id": "com.android.chrome:id/url_bar",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "focused": True,
+                        "target_id": "n017",
+                    }
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertEqual(result["decision"].skill, "search_in_app")
+        self.assertEqual(result["decision"].args["query"], "bilibili llm")
+        self.assertTrue(result["decision"].args["prefer_intent"])
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_stylus_overlay_prefers_back_before_input(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed when a blocker overlay is already visible")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed when a blocker overlay is already visible")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open chrome, open bilibili, and find videos about llm",
+            task_type="guided_ui_task",
+            screen_summary={
+                "app": "com.android.chrome",
+                "page": "browser_search",
+                "visible_text": [
+                    "Search or type URL",
+                    "Try out your stylus",
+                    "Write here",
+                    "Reset",
+                    "Cancel",
+                    "Next",
+                ],
+                "possible_targets": [
+                    {
+                        "label": "Search or type URL",
+                        "resource_id": "com.android.chrome:id/url_bar",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "focused": True,
+                        "target_id": "n017",
+                    }
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertEqual(result["decision"].skill, "back")
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_browser_search_results_mark_goal_complete(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed when the browser search goal is already complete")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed when the browser search goal is already complete")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open chrome, open bilibili, and find videos about llm",
+            task_type="guided_ui_task",
+            screen_summary={
+                "app": "com.android.chrome",
+                "page": "browser_results",
+                "visible_text": [
+                    "llm-哔哩哔哩_Bilibili",
+                    "m.bilibili.com/search?keyword=llm",
+                ],
+                "possible_targets": [],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertIsNone(result["decision"].skill)
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_browser_site_search_url_marks_goal_complete_even_with_garbled_text(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed when the URL proves the search is complete")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed when the URL proves the search is complete")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open chrome and open bilibili website search llm",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "bilibili_search_results",
+                "app": "com.android.chrome",
+                "current_package": "com.android.chrome",
+                "current_domain": "m.bilibili.com",
+                "current_url": "https://m.bilibili.com/search?keyword=Llm",
+                "visible_text": ["鍝斿摡鍝斿摡", "乱码 title"],
+                "possible_targets": [],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertIsNone(result["decision"].skill)
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_interaction_pattern_is_disabled_for_guided_ui_tasks(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=False)
+        calls = {"local": 0}
+
+        def fake_local(**kwargs):
+            calls["local"] += 1
+            return json.dumps(
+                {
+                    "decision": "execute",
+                    "task_type": "guided_ui_task",
+                    "skill": "type_text",
+                    "args": {
+                        "target_id": "n017",
+                        "action_id": "type:n017",
+                        "target": "Search or type URL",
+                        "text": "bilibili llm",
+                        "press_enter": True,
+                    },
+                    "confidence": 0.86,
+                    "requires_confirmation": False,
+                    "reason_summary": "Local text selected the focused browser input.",
+                }
+            )
+
+        orchestrator._call_openai_compatible_text = fake_local
+
+        with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": ""}):
+            result = orchestrator.resolve(
+                goal="open chrome, open bilibili, and find videos about llm",
+                task_type="guided_ui_task",
+                screen_summary={
+                    "page": "messages_search",
+                    "visible_text": ["Search or type URL"],
+                    "possible_targets": [
+                        {
+                            "label": "Search or type URL",
+                            "resource_id": "com.android.chrome:id/url_bar",
+                            "class_name": "android.widget.EditText",
+                            "clickable": True,
+                            "focused": True,
+                            "target_id": "n017",
+                        }
+                    ],
+                },
+                screenshot_path=None,
+                recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+                relevant_memories=[],
+                normalized_context={
+                    "goal": "open chrome, open bilibili, and find videos about llm",
+                    "task_type": "guided_ui_task",
+                    "screen_summary": {"page": "messages_search", "visible_text": ["Search or type URL"]},
+                    "recent_actions": [{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+                    "relevant_memories": [],
+                    "interaction_pattern": {
+                        "skill": "type_text",
+                        "args": {
+                            "target_id": "n017",
+                            "action_id": "type:n017",
+                            "target": "Search or type URL",
+                            "text": "bilibili llm",
+                            "press_enter": True,
+                            "dismiss_overlays_first": True,
+                        },
+                        "confidence": 0.96,
+                    },
+                },
+            )
+
+        self.assertNotEqual(result["decision"].selected_backend, "interaction_pattern")
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertEqual(result["decision"].skill, "search_in_app")
+        self.assertEqual(result["decision"].args["query"], "bilibili llm")
+        self.assertEqual(calls["local"], 0)
+
+    def test_interaction_pattern_reenabled_for_guided_ui_when_opted_in(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=False)
+        calls = {"local": 0}
+
+        def fake_local(**kwargs):
+            calls["local"] += 1
+            return "{}"
+
+        orchestrator._call_openai_compatible_text = fake_local
+
+        with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": "1"}):
+            result = orchestrator.resolve(
+                goal="open chrome, open bilibili, and find videos about llm",
+                task_type="guided_ui_task",
+                screen_summary={
+                    "page": "messages_search",
+                    "visible_text": ["Search or type URL"],
+                    "possible_targets": [
+                        {
+                            "label": "Search or type URL",
+                            "resource_id": "com.android.chrome:id/url_bar",
+                            "class_name": "android.widget.EditText",
+                            "clickable": True,
+                            "focused": True,
+                            "target_id": "n017",
+                        }
+                    ],
+                },
+                screenshot_path=None,
+                recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+                relevant_memories=[],
+                normalized_context={
+                    "goal": "open chrome, open bilibili, and find videos about llm",
+                    "task_type": "guided_ui_task",
+                    "screen_summary": {"page": "messages_search", "visible_text": ["Search or type URL"]},
+                    "recent_actions": [{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+                    "relevant_memories": [],
+                    "interaction_pattern": {
+                        "skill": "type_text",
+                        "args": {
+                            "target_id": "n017",
+                            "action_id": "type:n017",
+                            "target": "Search or type URL",
+                            "text": "bilibili llm",
+                            "press_enter": True,
+                            "dismiss_overlays_first": True,
+                        },
+                        "confidence": 0.96,
+                    },
+                },
+            )
+
+        self.assertEqual(result["decision"].selected_backend, "interaction_pattern")
+        self.assertEqual(result["decision"].skill, "type_text")
+        self.assertEqual(result["decision"].args["text"], "bilibili llm")
+        self.assertEqual(calls["local"], 0)
 
 
 if __name__ == "__main__":

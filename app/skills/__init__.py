@@ -5,6 +5,7 @@ from typing import Dict
 from app.skills.back import BackSkill
 from app.skills.confirm_action import ConfirmActionSkill
 from app.skills.extract_value import ExtractValueSkill
+from app.skills.manual_intervention import ManualInterventionSkill
 from app.skills.open_calendar_event import OpenCalendarEventSkill
 from app.skills.open_app import OpenAppSkill
 from app.skills.open_message_thread import OpenMessageThreadSkill
@@ -31,6 +32,7 @@ def build_skill_registry() -> Dict[str, object]:
         ReasonAboutPageSkill(),
         ExtractValueSkill(),
         ConfirmActionSkill(),
+        ManualInterventionSkill(),
         SearchInAppSkill(),
     ]
     return dict((skill.name, skill) for skill in skills)

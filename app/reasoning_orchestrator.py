@@ -4,6 +4,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -11,6 +12,7 @@ from app.model_runtime import ModelRuntime
 from app.reasoning_validator import ReasoningValidator
 from app.schemas.reasoning_decision import ReasoningDecision
 from app.trace_bus import TraceBus
+from app.learning_flags import guided_ui_memory_expansion_enabled
 from app.task_types import TASK_GUIDED_UI_TASK, extract_message_body
 
 
@@ -124,6 +126,24 @@ class ReasoningOrchestrator(object):
         )
         if self._is_resolved(shortcut_result["decision"], goal, task_type):
             return self._finish(shortcut_result["decision"], screen_summary)
+
+        pattern_result = self._resolve_interaction_pattern(
+            goal=goal,
+            task_type=task_type,
+            context_payload=context_payload,
+        )
+        if self._is_resolved(pattern_result["decision"], goal, task_type):
+            return self._finish(pattern_result["decision"], screen_summary)
+
+        interaction_pattern_decision = self._guided_interaction_pattern_decision(
+            goal=goal,
+            task_type=task_type,
+            context_payload=context_payload,
+            screen_summary=screen_summary,
+            recent_actions=recent_actions,
+        )
+        if interaction_pattern_decision:
+            return self._finish(interaction_pattern_decision, screen_summary)
 
         if self._should_use_cloud_first(goal, task_type):
             cloud_result = self._resolve_cloud_review(goal, task_type, context_payload, screenshot_path)
@@ -327,6 +347,63 @@ class ReasoningOrchestrator(object):
             success=not decision.validation_errors,
             confidence=decision.confidence,
             reason_summary=decision.reason_summary or "Memory shortcut resolved the current page.",
+            fallback_triggered=not self._is_resolved(decision, goal, task_type),
+        )
+        return {"decision": decision}
+
+    def _resolve_interaction_pattern(
+        self,
+        goal: str,
+        task_type: str,
+        context_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if task_type == TASK_GUIDED_UI_TASK and not guided_ui_memory_expansion_enabled():
+            return {
+                "decision": ReasoningDecision(
+                    decision="unsupported",
+                    task_type=task_type,
+                    confidence=0.0,
+                    reason_summary="Interaction-pattern memory is disabled for guided UI tasks.",
+                    validation_errors=["interaction-pattern memory disabled for guided ui tasks"],
+                    selected_backend="interaction_pattern",
+                    fallback_used=False,
+                )
+            }
+        pattern = context_payload.get("interaction_pattern")
+        if not isinstance(pattern, dict) or not pattern.get("skill"):
+            return {
+                "decision": ReasoningDecision(
+                    decision="unsupported",
+                    task_type=task_type,
+                    confidence=0.0,
+                    reason_summary="No interaction pattern matched the current state.",
+                    validation_errors=["interaction pattern unavailable"],
+                    selected_backend="interaction_pattern",
+                    fallback_used=False,
+                )
+            }
+        decision = self.validator.validate_payload(
+            payload={
+                "decision": "execute",
+                "task_type": task_type,
+                "skill": pattern.get("skill"),
+                "args": dict(pattern.get("args") or {}),
+                "confidence": float(pattern.get("confidence", 0.9)),
+                "requires_confirmation": False,
+                "reason_summary": "Abstract interaction pattern matched the current state.",
+            },
+            expected_task_type=task_type,
+            goal=goal,
+            selected_backend="interaction_pattern",
+            fallback_used=False,
+            context=context_payload,
+        )
+        self.trace_bus.emit(
+            stage="interaction_pattern.result",
+            backend="interaction_pattern",
+            success=not decision.validation_errors,
+            confidence=decision.confidence,
+            reason_summary=decision.reason_summary or "Interaction pattern resolved the current state.",
             fallback_triggered=not self._is_resolved(decision, goal, task_type),
         )
         return {"decision": decision}
@@ -706,11 +783,31 @@ class ReasoningOrchestrator(object):
             return False
         normalized = (goal or "").strip().lower()
         page = str((screen_summary or {}).get("page") or "").strip().lower()
+        current_url = str((screen_summary or {}).get("current_url") or "").strip().lower()
+        current_domain = str((screen_summary or {}).get("current_domain") or "").strip().lower()
         requested_text = extract_message_body(goal)
+        visible_text = " ".join(str(item).lower() for item in (screen_summary or {}).get("visible_text", []))
         if requested_text:
-            visible_text = " ".join(str(item).lower() for item in (screen_summary or {}).get("visible_text", []))
             if requested_text.lower() not in visible_text:
                 return False
+        if ReasoningOrchestrator._goal_looks_search(goal):
+            query = ReasoningOrchestrator._extract_search_query(goal)
+            query_tokens = [token for token in re.findall(r"[a-z0-9]+", query.lower()) if len(token) >= 2]
+            query_hits = sum(1 for token in query_tokens if token in visible_text)
+            site_terms = ("bilibili", "youtube", "github", "reddit", "wikipedia", "amazon", "facebook")
+            url_hit = any(token in current_url for token in query_tokens) and (
+                "/search" in current_url or "keyword=" in current_url or "q=" in current_url
+            )
+            domain_hit = any(term in normalized and term in current_domain for term in site_terms)
+            if url_hit and (domain_hit or not any(term in normalized for term in site_terms)):
+                return True
+            site_hit = any(term in normalized and term in visible_text for term in site_terms) or (
+                "bilibili" in normalized and "哔哩哔哩" in visible_text
+            )
+            if query_hits >= max(1, min(2, len(query_tokens))) and (
+                "search?keyword=" in visible_text or "results" in visible_text or site_hit or page.endswith("search_results")
+            ):
+                return True
         if page == "keep_editor" and "keep" in normalized and (
             "create a note" in normalized
             or "create a text note" in normalized
@@ -765,6 +862,240 @@ class ReasoningOrchestrator(object):
             confidence=0.92,
             requires_confirmation=False,
             reason_summary="The Keep editor is open; type the requested note text.",
+            validation_errors=[],
+            selected_backend="rule",
+            fallback_used=True,
+        )
+
+    @staticmethod
+    def _candidate_text(candidate: Dict[str, Any]) -> str:
+        return " ".join(
+            str(candidate.get(key) or "").strip().lower()
+            for key in ("label", "resource_id", "content_desc", "class_name", "hint")
+        )
+
+    @classmethod
+    def _find_best_input_target(
+        cls,
+        screen_summary: Dict[str, Any],
+        focused_only: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        best_target: Optional[Dict[str, Any]] = None
+        best_score = -1
+        for target in (screen_summary or {}).get("possible_targets", []):
+            if not isinstance(target, dict):
+                continue
+            class_name = str(target.get("class_name") or "").lower()
+            if "edittext" not in class_name:
+                continue
+            if focused_only and not bool(target.get("focused")):
+                continue
+            score = 0
+            if bool(target.get("focused")):
+                score += 4
+            if bool(target.get("clickable")):
+                score += 1
+            combined = cls._candidate_text(target)
+            if any(marker in combined for marker in ("search", "url", "query", "address", "find")):
+                score += 2
+            if score > best_score:
+                best_score = score
+                best_target = target
+        return best_target
+
+    @classmethod
+    def _text_corpus(cls, screen_summary: Dict[str, Any]) -> str:
+        fragments: List[str] = []
+        for item in (screen_summary or {}).get("visible_text", []):
+            text = str(item or "").strip().lower()
+            if text:
+                fragments.append(text)
+        for candidate in (screen_summary or {}).get("possible_targets", []):
+            if not isinstance(candidate, dict):
+                continue
+            combined = cls._candidate_text(candidate)
+            if combined:
+                fragments.append(combined)
+        return " ".join(fragments)
+
+    @classmethod
+    def _has_input_blocker_overlay(cls, screen_summary: Dict[str, Any]) -> bool:
+        corpus = cls._text_corpus(screen_summary)
+        if not corpus:
+            return False
+        strong_markers = (
+            "try out your stylus",
+            "write here",
+            "use your stylus",
+            "handwriting is automatically converted to text",
+            "stylus",
+        )
+        if not any(marker in corpus for marker in strong_markers):
+            return False
+        blocker_markers = ("cancel", "next", "reset", "write", "delete", "select", "insert")
+        return sum(1 for marker in blocker_markers if marker in corpus) >= 2
+
+    @classmethod
+    def _looks_like_browser_search_surface(
+        cls,
+        screen_summary: Dict[str, Any],
+        input_target: Dict[str, Any],
+    ) -> bool:
+        combined = cls._candidate_text(input_target)
+        if "url_bar" in combined or "location_bar" in combined:
+            return True
+        app_name = str((screen_summary or {}).get("app") or "").strip().lower()
+        focus = str((screen_summary or {}).get("focus") or "").strip().lower()
+        if any(marker in combined for marker in ("search", "url", "address")) and any(
+            marker in "{0} {1}".format(app_name, focus)
+            for marker in ("chrome", "browser")
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _goal_looks_search(goal: str) -> bool:
+        normalized = str(goal or "").strip().lower()
+        return any(
+            marker in normalized
+            for marker in ("search ", "search for", "find ", "find videos", "find video", "look up", "look for")
+        )
+
+    @staticmethod
+    def _goal_looks_video_search(goal: str) -> bool:
+        normalized = str(goal or "").strip().lower()
+        return "video" in normalized or "videos" in normalized
+
+    @classmethod
+    def _extract_search_query(cls, goal: str) -> str:
+        quoted = extract_message_body(goal)
+        if quoted:
+            return quoted
+        normalized = str(goal or "").strip().lower()
+        patterns = (
+            r"(?:find|look\s+for|look\s+up|search(?:\s+for)?)(?:\s+videos?)?(?:\s+about|\s+for)?\s+(.+)",
+            r"(?:videos?\s+about)\s+(.+)",
+        )
+        query = ""
+        for pattern in patterns:
+            match = __import__("re").search(pattern, normalized, __import__("re").IGNORECASE)
+            if match:
+                query = match.group(1).strip(" .,!?:;")
+                break
+        if not query:
+            return ""
+        query = __import__("re").sub(r"^(on|in|with)\s+", "", query).strip()
+        query = __import__("re").sub(r"\s+(on|in)\s+(chrome|browser|web)\b.*$", "", query).strip()
+        if not query:
+            return ""
+        known_terms = []
+        for term in ("bilibili", "youtube", "wikipedia", "amazon", "github", "reddit", "facebook", "b站"):
+            if term in normalized:
+                known_terms.append("bilibili" if term == "b站" else term)
+        if known_terms and not any(term in query for term in known_terms):
+            query = "{0} {1}".format(known_terms[0], query).strip()
+        return query[:120]
+
+    @classmethod
+    def _guided_interaction_pattern_decision(
+        cls,
+        goal: str,
+        task_type: str,
+        context_payload: Dict[str, Any],
+        screen_summary: Dict[str, Any],
+        recent_actions: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[ReasoningDecision]:
+        if task_type != TASK_GUIDED_UI_TASK:
+            return None
+        if cls._is_read_only_guided_request(goal):
+            return None
+
+        input_target = cls._find_best_input_target(screen_summary, focused_only=True) or cls._find_best_input_target(
+            screen_summary,
+            focused_only=False,
+        )
+        if not input_target:
+            return None
+
+        requested_text = extract_message_body(goal)
+        press_enter = False
+        dismiss_overlays_first = False
+        if requested_text:
+            text = requested_text
+        elif cls._goal_looks_search(goal):
+            combined = cls._candidate_text(input_target)
+            if not any(marker in combined for marker in ("search", "url", "query", "address", "find")):
+                return None
+            text = cls._extract_search_query(goal)
+            if not text:
+                return None
+            if cls._has_input_blocker_overlay(screen_summary):
+                return ReasoningDecision(
+                    decision="execute",
+                    task_type=task_type,
+                    skill="back",
+                    args={},
+                    confidence=0.90,
+                    requires_confirmation=False,
+                    reason_summary="An input-blocking overlay is visible; dismiss it before searching.",
+                    validation_errors=[],
+                    selected_backend="rule",
+                    fallback_used=True,
+                )
+            if cls._looks_like_browser_search_surface(screen_summary, input_target):
+                return ReasoningDecision(
+                    decision="execute",
+                    task_type=task_type,
+                    skill="search_in_app",
+                    args={
+                        "query": text,
+                        "prefer_intent": True,
+                        "press_enter": True,
+                    },
+                    confidence=0.92,
+                    requires_confirmation=False,
+                    reason_summary="A browser search surface is focused; open the search through a web intent.",
+                    validation_errors=[],
+                    selected_backend="rule",
+                    fallback_used=True,
+                )
+            press_enter = True
+            dismiss_overlays_first = True
+        else:
+            return None
+
+        repeated_taps = [
+            action
+            for action in (recent_actions or [])
+            if str((action or {}).get("action") or "").strip() == "tap" and bool((action or {}).get("success"))
+        ]
+        if len(repeated_taps) >= 1 and cls._goal_looks_search(goal):
+            dismiss_overlays_first = True
+
+        args: Dict[str, Any] = {
+            "text": text,
+            "target": input_target.get("label") or input_target.get("hint") or "Input",
+        }
+        target_id = str(input_target.get("target_id") or "").strip()
+        if target_id:
+            args["target_id"] = target_id
+            args["action_id"] = "type:{0}".format(target_id)
+        if press_enter:
+            args["press_enter"] = True
+        if dismiss_overlays_first:
+            args["dismiss_overlays_first"] = True
+
+        summary = "A focused input is available; enter the requested text."
+        if cls._goal_looks_video_search(goal):
+            summary = "A focused search input is available; enter the synthesized video search query."
+        return ReasoningDecision(
+            decision="execute",
+            task_type=task_type,
+            skill="type_text",
+            args=args,
+            confidence=0.91,
+            requires_confirmation=False,
+            reason_summary=summary,
             validation_errors=[],
             selected_backend="rule",
             fallback_used=True,

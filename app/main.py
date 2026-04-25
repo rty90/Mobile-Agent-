@@ -5,6 +5,7 @@ import json
 import os
 import sys
 
+from app.coach import run_coach_session
 from app.context_builder import ContextBuilder
 from app.demo_config import build_demo_message_config
 from app.executor import Executor
@@ -62,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agent-mode",
         default=None,
-        choices=["bounded", "interactive"],
-        help="Execution mode. Interactive is recommended for read_current_screen and guided_ui_task.",
+        choices=["bounded", "interactive", "coach"],
+        help="Execution mode. Coach mode suggests actions while you operate manually.",
     )
     parser.add_argument(
         "--reasoner-backend",
@@ -241,6 +242,22 @@ def run_task(
             }
 
         adb.ensure_device()
+        if resolved_agent_mode == "coach":
+            result = run_coach_session(
+                runtime=runtime,
+                task_text=task_text,
+                task_type=plan.task_type,
+                max_steps=max_steps,
+            )
+            result["route_mode"] = decision.mode
+            result["reason"] = decision.reason
+            result["risk_level"] = decision.risk_level
+            result["logs_path"] = LOG_PATH
+            result["screenshots_root"] = SCREENSHOT_ROOT
+            result["trace_path"] = str(trace_bus.trace_path)
+            logger.info("Coach session completed with success=%s", result["success"])
+            return result
+
         result = executor.execute_plan(plan, agent_mode=resolved_agent_mode, max_steps=max_steps)
         result["route_mode"] = decision.mode
         result["reason"] = decision.reason

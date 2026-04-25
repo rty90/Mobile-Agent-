@@ -1,8 +1,33 @@
 import unittest
+from pathlib import Path
 
 from app.affordances import build_affordance_graph
 from app.demo_config import build_demo_message_config
-from app.skills.read_screen import detect_page_name
+from app.skills.read_screen import detect_page_name, read_screen_summary
+
+
+CHROME_BILIBILI_SEARCH_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <node text="" resource-id="" package="com.android.chrome" clickable="false" bounds="[0,0][1280,2856]" class="android.widget.FrameLayout" />
+  <node text="m.bilibili.com/search?keyword=Llm" resource-id="com.android.chrome:id/url_bar" package="com.android.chrome" clickable="true" focusable="true" focused="false" bounds="[240,156][836,324]" class="android.widget.EditText" hint="Search Google or type URL" />
+  <node text="Why AI can't fix its own code problems" resource-id="" package="com.android.chrome" clickable="false" bounds="[531,1110][1260,1224]" class="android.widget.TextView" />
+</hierarchy>
+"""
+
+
+class ReadScreenADB(object):
+    def __init__(self, xml_text, focus="mCurrentFocus=Window{123 u0 com.android.chrome/.Main}"):
+        self.xml_text = xml_text
+        self.focus = focus
+
+    def dump_ui_xml(self, local_path):
+        path = Path(local_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.xml_text, encoding="utf-8")
+        return path
+
+    def get_current_focus(self):
+        return self.focus
 
 
 class ReadScreenTests(unittest.TestCase):
@@ -68,6 +93,19 @@ class ReadScreenTests(unittest.TestCase):
         self.assertIn("tap:n001", action_ids)
         self.assertIn("type:n001", action_ids)
         self.assertEqual(graph["actions"][0]["args"]["target_id"], "n001")
+
+    def test_read_screen_extracts_chrome_package_url_and_bilibili_search_page(self):
+        summary = read_screen_summary(
+            ReadScreenADB(CHROME_BILIBILI_SEARCH_XML),
+            "tmp/test_dbs/chrome_bilibili_search.xml",
+            runtime_config=build_demo_message_config(),
+        )
+
+        self.assertEqual(summary["app"], "com.android.chrome")
+        self.assertEqual(summary["current_package"], "com.android.chrome")
+        self.assertEqual(summary["current_domain"], "m.bilibili.com")
+        self.assertEqual(summary["page"], "bilibili_search_results")
+        self.assertIn("keyword=Llm", summary["current_url"])
 
 
 if __name__ == "__main__":

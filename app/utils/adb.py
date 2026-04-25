@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -53,6 +54,8 @@ def find_adb_path(explicit_path: Optional[str] = None) -> str:
 
 class ADBClient(object):
     """Thin wrapper around adb for device interaction only."""
+
+    ADB_KEYBOARD_IME_ID = "com.android.adbkeyboard/.AdbIME"
 
     def __init__(
         self,
@@ -180,6 +183,42 @@ class ADBClient(object):
         escaped = escaped.replace("\n", "%s")
         self.shell('input text "{0}"'.format(escaped))
 
+    def list_input_methods(self) -> List[str]:
+        output = self.shell("ime list -s", check=False)
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def current_input_method(self) -> str:
+        return self.shell("settings get secure default_input_method", check=False).strip()
+
+    def has_input_method(self, ime_id: str) -> bool:
+        return ime_id in self.list_input_methods()
+
+    def enable_input_method(self, ime_id: str) -> None:
+        self.shell("ime enable {0}".format(ime_id), check=False)
+
+    def set_input_method(self, ime_id: str) -> None:
+        self.shell("ime set {0}".format(ime_id))
+
+    def input_text_via_adb_keyboard(self, text: str) -> bool:
+        if not self.has_input_method(self.ADB_KEYBOARD_IME_ID):
+            return False
+        original_ime = self.current_input_method()
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        try:
+            self.enable_input_method(self.ADB_KEYBOARD_IME_ID)
+            self.set_input_method(self.ADB_KEYBOARD_IME_ID)
+            self.shell("am broadcast -a ADB_INPUT_B64 --es msg {0}".format(encoded))
+            return True
+        finally:
+            if original_ime and original_ime != self.ADB_KEYBOARD_IME_ID:
+                self.shell("ime set {0}".format(original_ime), check=False)
+
+    def input_text_best_effort(self, text: str) -> str:
+        if self.input_text_via_adb_keyboard(text):
+            return "adb_keyboard"
+        self.input_text(text)
+        return "shell_input"
+
     def back(self) -> None:
         self.keyevent(4)
 
@@ -219,6 +258,22 @@ class ADBClient(object):
             self.shell(
                 "monkey -p {0} -c android.intent.category.LAUNCHER 1".format(package_name)
             )
+        if wait_time > 0:
+            time.sleep(wait_time)
+
+    def open_url(
+        self,
+        url: str,
+        package_name: Optional[str] = None,
+        wait_time: float = 1.0,
+    ) -> None:
+        safe_url = str(url or "").strip().replace('"', "%22")
+        if not safe_url:
+            raise ADBError("open_url requires a non-empty url.")
+        command = 'am start -a android.intent.action.VIEW -d "{0}"'.format(safe_url)
+        if package_name:
+            command += ' -p "{0}"'.format(str(package_name).strip())
+        self.shell(command)
         if wait_time > 0:
             time.sleep(wait_time)
 

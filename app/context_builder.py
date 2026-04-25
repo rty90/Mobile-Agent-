@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from app.affordances import build_affordance_graph
+from app.learning_flags import guided_ui_memory_expansion_enabled, guided_ui_raw_memory_enabled
 from app.memory import SQLiteMemory
 from app.reminder_parser import parse_reminder_task
 from app.state import AgentState
@@ -73,9 +74,22 @@ class ContextBuilder(object):
         goal: str,
         app_name: str,
     ) -> List[Dict[str, Any]]:
+        if task_type == TASK_GUIDED_UI_TASK and not guided_ui_memory_expansion_enabled():
+            return []
+        learned = self.memory.get_relevant_learned_procedures(
+            task_type=task_type,
+            intent=goal,
+            app=app_name,
+            limit=3,
+        )
+        if task_type == TASK_GUIDED_UI_TASK:
+            if learned and not guided_ui_raw_memory_enabled():
+                return learned[:3]
+            if not guided_ui_raw_memory_enabled():
+                return []
         successes = self.memory.get_relevant_successes(task_type=task_type, app=app_name, limit=2)
         failures = self.memory.get_relevant_failures(task_type=task_type, app=app_name, limit=1)
-        merged = successes + failures
+        merged = learned + successes + failures
         if merged:
             return merged[:3]
 
@@ -109,6 +123,26 @@ class ContextBuilder(object):
             screen_summary=summary,
         )
 
+    def _build_interaction_pattern(
+        self,
+        goal: str,
+        state: AgentState,
+        task_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        if task_type == TASK_GUIDED_UI_TASK and not guided_ui_memory_expansion_enabled():
+            return None
+        summary = state.screen_summary or {}
+        page_name = str(summary.get("page") or state.current_page or "").strip()
+        app_name = str(state.current_app or summary.get("app") or "").strip()
+        return self.memory.find_interaction_pattern(
+            task_type=task_type,
+            app=app_name,
+            page=page_name,
+            goal=goal,
+            screen_summary=summary,
+            recent_actions=state.recent_actions,
+        )
+
     def _build_contact_context(self, goal: str) -> List[Dict[str, Any]]:
         contact_query = extract_contact_query(goal)
         if contact_query:
@@ -137,6 +171,7 @@ class ContextBuilder(object):
             "recent_actions": state.recent_action_context(limit=2),
             "relevant_memories": self._build_memories(resolved_task_type, goal, current_app),
             "ui_shortcut": self._build_ui_shortcut(goal, state, resolved_task_type),
+            "interaction_pattern": self._build_interaction_pattern(goal, state, resolved_task_type),
             "risk_flag": state.risk_flag,
         }
 
@@ -194,6 +229,7 @@ class ContextBuilder(object):
             "recent_actions": context.get("recent_actions", []),
             "relevant_memories": context.get("relevant_memories", []),
             "ui_shortcut": context.get("ui_shortcut"),
+            "interaction_pattern": context.get("interaction_pattern"),
             "risk_flag": context.get("risk_flag", False),
             "known_contact": context.get("known_contact"),
             "target_app_hint": context.get("target_app_hint"),

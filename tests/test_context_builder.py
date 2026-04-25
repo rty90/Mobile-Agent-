@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.context_builder import ContextBuilder
 from app.memory import SQLiteMemory
@@ -158,15 +159,194 @@ class ContextBuilderTests(unittest.TestCase):
                 },
             )
             builder = ContextBuilder(memory=memory)
-            context = builder.build(
-                "open keep and tell me what is on the current page",
-                state=state,
-                task_type="guided_ui_task",
-            )
+            with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": ""}):
+                context = builder.build(
+                    "open keep and tell me what is on the current page",
+                    state=state,
+                    task_type="guided_ui_task",
+                )
 
         self.assertEqual(context["target_app_hint"], "keep")
-        self.assertEqual(len(context["relevant_memories"]), 1)
+        self.assertEqual(len(context["relevant_memories"]), 0)
         self.assertEqual(context["ui_shortcut"]["skill"], "tap")
+
+    def test_context_builder_reenables_guided_ui_memories_when_opted_in(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            memory.upsert_learned_procedure(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                intent="open keep and create a note",
+                title="filtered keep note procedure",
+                procedure={
+                    "steps": [
+                        {"skill": "open_app", "target": "keep"},
+                        {"skill": "tap", "target": "Take a note"},
+                    ],
+                    "safety": {"auto_execute": False},
+                },
+                confidence=0.9,
+                verified=True,
+            )
+            state = AgentState(
+                current_app="com.google.android.keep",
+                screen_summary={"page": "keep_home", "visible_text": ["Take a note"]},
+            )
+            builder = ContextBuilder(memory=memory)
+            with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": "1"}):
+                context = builder.build(
+                    "open keep and create a note",
+                    state=state,
+                    task_type="guided_ui_task",
+                )
+
+        self.assertEqual(len(context["relevant_memories"]), 1)
+        self.assertEqual(context["relevant_memories"][0]["task_type"], "guided_ui_task")
+        self.assertEqual(context["relevant_memories"][0]["source"], "learned_procedure")
+
+    def test_context_builder_filters_raw_guided_ui_memories_by_default_when_opted_in(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            memory.add_successful_trajectory(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                intent="open keep and create a note",
+                steps_summary="coach_mode: human demonstration with agent suggestions",
+                confidence=0.9,
+                verified=True,
+            )
+            state = AgentState(
+                current_app="com.google.android.keep",
+                screen_summary={"page": "keep_home", "visible_text": ["Take a note"]},
+            )
+            builder = ContextBuilder(memory=memory)
+            with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": "1"}):
+                context = builder.build(
+                    "open keep and create a note",
+                    state=state,
+                    task_type="guided_ui_task",
+                )
+
+        self.assertEqual(context["relevant_memories"], [])
+
+    def test_context_builder_can_include_raw_guided_ui_memories_when_explicitly_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            memory.add_successful_trajectory(
+                task_type="guided_ui_task",
+                app="com.google.android.keep",
+                intent="open keep and create a note",
+                steps_summary="coach_mode: human demonstration with agent suggestions",
+                confidence=0.9,
+                verified=True,
+            )
+            state = AgentState(
+                current_app="com.google.android.keep",
+                screen_summary={"page": "keep_home", "visible_text": ["Take a note"]},
+            )
+            builder = ContextBuilder(memory=memory)
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": "1",
+                    "AGENT_INCLUDE_RAW_GUIDED_UI_MEMORY": "1",
+                },
+            ):
+                context = builder.build(
+                    "open keep and create a note",
+                    state=state,
+                    task_type="guided_ui_task",
+                )
+
+        self.assertEqual(len(context["relevant_memories"]), 1)
+        self.assertEqual(context["relevant_memories"][0]["source"], "success")
+
+    def test_context_builder_disables_interaction_pattern_for_guided_ui_task(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            screen_summary = {
+                "page": "messages_search",
+                "visible_text": ["Search or type URL"],
+                "possible_targets": [
+                    {
+                        "label": "Search or type URL",
+                        "resource_id": "com.android.chrome:id/url_bar",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "focused": True,
+                        "target_id": "n017",
+                    }
+                ],
+            }
+            memory.remember_interaction_pattern(
+                task_type="guided_ui_task",
+                app="com.android.chrome",
+                page="messages_search",
+                goal="open chrome, open bilibili, and find videos about llm",
+                screen_summary=screen_summary,
+                recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+                skill="type_text",
+                args={"target_id": "n017", "text": "bilibili llm", "press_enter": True},
+                confidence=0.96,
+            )
+            state = AgentState(
+                current_app="com.android.chrome",
+                screen_summary=screen_summary,
+                recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+            )
+            builder = ContextBuilder(memory=memory)
+            with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": ""}):
+                context = builder.build(
+                    "open chrome, open bilibili, and find videos about llm",
+                    state=state,
+                    task_type="guided_ui_task",
+                )
+
+        self.assertIsNone(context["interaction_pattern"])
+
+    def test_context_builder_reenables_guided_ui_interaction_pattern_when_opted_in(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            screen_summary = {
+                "page": "messages_search",
+                "visible_text": ["Search or type URL"],
+                "possible_targets": [
+                    {
+                        "label": "Search or type URL",
+                        "resource_id": "com.android.chrome:id/url_bar",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "focused": True,
+                        "target_id": "n017",
+                    }
+                ],
+            }
+            memory.remember_interaction_pattern(
+                task_type="guided_ui_task",
+                app="com.android.chrome",
+                page="messages_search",
+                goal="open chrome, open bilibili, and find videos about llm",
+                screen_summary=screen_summary,
+                recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+                skill="type_text",
+                args={"target_id": "n017", "text": "bilibili llm", "press_enter": True},
+                confidence=0.96,
+            )
+            state = AgentState(
+                current_app="com.android.chrome",
+                screen_summary=screen_summary,
+                recent_actions=[{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}],
+            )
+            builder = ContextBuilder(memory=memory)
+            with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": "1"}):
+                context = builder.build(
+                    "open chrome, open bilibili, and find videos about llm",
+                    state=state,
+                    task_type="guided_ui_task",
+                )
+
+        self.assertIsNotNone(context["interaction_pattern"])
+        self.assertEqual(context["interaction_pattern"]["skill"], "type_text")
 
 
 if __name__ == "__main__":

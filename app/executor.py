@@ -8,6 +8,7 @@ from app.skills.base import SkillContext
 from app.skills.read_screen import read_screen_summary
 from app.skills.targeting import find_semantic_target
 from app.state import AgentState
+from app.learning_flags import guided_ui_memory_expansion_enabled
 from app.task_types import TASK_GUIDED_UI_TASK
 from app.utils.logger import log_action
 from app.utils.screenshot import ScreenshotManager
@@ -47,6 +48,25 @@ class Executor(object):
             "back",
             "wait",
             "search_in_app",
+        }
+        self._manual_intervention_failure_markers = (
+            "text input did not change the ui",
+            "unable to find",
+            "expected ",
+            "input-blocking overlay",
+            "interactive action requires manual confirmation",
+            "manual intervention is required",
+        )
+        self._generic_onboarding_targets = {
+            "ok",
+            "got it",
+            "take me to gmail",
+            "next",
+            "continue",
+            "allow",
+            "not now",
+            "skip",
+            "cancel",
         }
 
     def _context(self) -> SkillContext:
@@ -152,12 +172,37 @@ class Executor(object):
         result = self._run_skill(resolved_step, context)
         result = self._finalize_result(resolved_step, result, step_index)
         if result["success"]:
+            loop_intervention = self._maybe_request_loop_intervention(
+                resolved_step,
+                result,
+                context,
+                step_index,
+            )
+            if loop_intervention:
+                return loop_intervention
             return result
 
         if self._should_attempt_recovery(resolved_step, result):
             recovered = self._attempt_recovery(resolved_step, context, step_index)
             if recovered["success"]:
                 return recovered
+            intervention = self._maybe_request_manual_intervention(
+                resolved_step,
+                recovered,
+                context,
+                step_index,
+            )
+            if intervention:
+                return intervention
+
+        intervention = self._maybe_request_manual_intervention(
+            resolved_step,
+            result,
+            context,
+            step_index,
+        )
+        if intervention:
+            return intervention
 
         return result
 
@@ -278,6 +323,134 @@ class Executor(object):
         detail = str(result.get("detail", "")).lower()
         return "unable to find" in detail or "expected" in detail
 
+    def _should_request_manual_intervention(
+        self,
+        step: PlanStep,
+        result: Dict[str, Any],
+    ) -> bool:
+        if self.state.task_type != TASK_GUIDED_UI_TASK:
+            return False
+        if step.skill == "manual_intervention":
+            return False
+        if bool((result.get("data") or {}).get("manual_intervention")):
+            return False
+        detail = str(result.get("detail", "")).strip().lower()
+        if any(marker in detail for marker in self._manual_intervention_failure_markers):
+            return True
+        if step.skill in ("tap", "type_text", "search_in_app", "back") and self.state.recent_failure_count(limit=2) >= 1:
+            return True
+        return False
+
+    @staticmethod
+    def _event_page(event: Dict[str, Any]) -> str:
+        data = event.get("data") or {}
+        summary = data.get("screen_summary") or {}
+        return str(summary.get("page") or "").strip()
+
+    def _extract_tap_target(self, event: Dict[str, Any]) -> str:
+        detail = str(event.get("detail") or "").strip()
+        prefix = "Tapped target "
+        if not detail.startswith(prefix):
+            return ""
+        target = detail[len(prefix):].strip()
+        if target.endswith("."):
+            target = target[:-1].strip()
+        return target.lower()
+
+    def _detect_no_progress_loop(
+        self,
+        step: PlanStep,
+    ) -> Optional[str]:
+        if self.state.task_type != TASK_GUIDED_UI_TASK:
+            return None
+        if step.skill not in ("tap", "read_screen", "reason_about_page"):
+            return None
+        recent = self.state.recent_actions[-6:]
+        if len(recent) < 4:
+            return None
+
+        pages = [self._event_page(event) for event in recent if self._event_page(event)]
+        if len(pages) < 3:
+            return None
+        current_page = str(self.state.current_page or "").strip()
+        stable_page = current_page and all(page == current_page for page in pages[-3:])
+        if not stable_page:
+            return None
+
+        successful_taps = [
+            event
+            for event in recent
+            if event.get("success") and str(event.get("action") or "").strip() == "tap"
+        ]
+        if len(successful_taps) < 2:
+            return None
+
+        tap_targets = [self._extract_tap_target(event) for event in successful_taps]
+        tap_targets = [target for target in tap_targets if target]
+        if len(tap_targets) < 2:
+            return None
+
+        repeated_generic_targets = [
+            target for target in tap_targets if target in self._generic_onboarding_targets
+        ]
+        if len(repeated_generic_targets) < 2:
+            return None
+
+        return (
+            "The UI stayed on page '{0}' while the agent kept tapping onboarding-style actions: {1}."
+        ).format(current_page or "unknown", ", ".join(tap_targets[-3:]))
+
+    def _maybe_request_manual_intervention(
+        self,
+        step: PlanStep,
+        result: Dict[str, Any],
+        context: SkillContext,
+        step_index: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._should_request_manual_intervention(step, result):
+            return None
+        target = step.args.get("target") or step.args.get("expect_target") or step.skill
+        prompt = (
+            "The agent is stuck while trying to {0}. "
+            "Please fix the UI manually, then press Enter to continue, or type 'fail' to abort."
+        ).format(target)
+        intervention_step = PlanStep(
+            "manual_intervention",
+            {
+                "reason": str(result.get("detail", "")).strip(),
+                "failed_skill": step.skill,
+                "failed_args": dict(step.args or {}),
+                "target": target,
+                "prompt": prompt,
+            },
+        )
+        return self._finalize_result(
+            intervention_step,
+            self._run_skill(intervention_step, context),
+            step_index,
+        )
+
+    def _maybe_request_loop_intervention(
+        self,
+        step: PlanStep,
+        result: Dict[str, Any],
+        context: SkillContext,
+        step_index: int,
+    ) -> Optional[Dict[str, Any]]:
+        loop_reason = self._detect_no_progress_loop(step)
+        if not loop_reason:
+            return None
+        synthetic_failure = {
+            "detail": loop_reason,
+            "data": result.get("data") or {},
+        }
+        return self._maybe_request_manual_intervention(
+            step,
+            synthetic_failure,
+            context,
+            step_index,
+        )
+
     def _run_interactive_loop(
         self,
         plan: ExecutionPlan,
@@ -384,6 +557,18 @@ class Executor(object):
             args=args,
             confidence=float(reasoning.get("confidence", 0.9)),
         )
+        if guided_ui_memory_expansion_enabled():
+            self.memory.remember_interaction_pattern(
+                task_type=plan.task_type,
+                app=app_before_action,
+                page=page_before_action,
+                goal=plan.goal,
+                screen_summary=self.state.screen_summary or {},
+                recent_actions=self.state.recent_actions,
+                skill=action_step.skill,
+                args=args,
+                confidence=float(reasoning.get("confidence", 0.9)),
+            )
 
     def _validate_interactive_action(
         self,

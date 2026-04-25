@@ -25,6 +25,7 @@ data/logs/
 data/screenshots/
 data/tmp/
 data/cache/
+data/apks/
 
 # Local tmp
 tmp/

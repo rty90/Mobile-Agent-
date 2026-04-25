@@ -131,6 +131,10 @@ class MockADB(object):
         if package_name == "com.google.android.keep":
             self.current_screen = "keep_home"
 
+    def open_url(self, url, package_name=None, wait_time=1.0):
+        self.intent_history.append({"url": url, "package_name": package_name})
+        self.current_screen = "booking_page"
+
     def tap(self, x, y):
         if self.current_screen == "keep_home":
             self.current_screen = "keep_editor"
@@ -140,6 +144,17 @@ class MockADB(object):
 
     def input_text(self, text):
         self.input_history.append(text)
+
+    def input_text_best_effort(self, text):
+        self.input_history.append(text)
+        if self.current_screen == "keep_editor":
+            self.xml_map["keep_editor"] = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <node text="Editing note" resource-id="editor_header" content-desc="" clickable="false" focusable="false" focused="false" enabled="true" bounds="[80,140][520,220]" class="android.widget.TextView" hint="" />
+  <node text="{0}" resource-id="note_editor" content-desc="" clickable="true" focusable="true" focused="true" enabled="true" bounds="[80,240][1000,1800]" class="android.widget.EditText" hint="" />
+</hierarchy>
+""".format(text)
+        return "shell_input"
 
     def keyevent(self, key_code):
         return None
@@ -342,6 +357,85 @@ class ExecutorTests(unittest.TestCase):
         )
         self.assertIsNotNone(shortcut)
         self.assertEqual(shortcut["skill"], "tap")
+
+    def test_guided_ui_task_records_interaction_pattern_when_opted_in(self):
+        adb = MockADB({"keep_home": KEEP_HOME_XML}, initial_screen="keep_home")
+        memory = self._build_memory("executor_guided_interaction_pattern.db")
+        executor, state = self._build_executor(adb, memory, "test-agent-guided-pattern")
+        screen_summary = {
+            "page": "messages_search",
+            "visible_text": ["Search or type URL"],
+            "possible_targets": [
+                {
+                    "label": "Search or type URL",
+                    "resource_id": "com.android.chrome:id/url_bar",
+                    "class_name": "android.widget.EditText",
+                    "clickable": True,
+                    "focused": True,
+                    "target_id": "n017",
+                }
+            ],
+        }
+        state.update_screen_summary(screen_summary)
+        state.recent_actions = [{"action": "tap", "success": True, "detail": "Tapped target Search or type URL."}]
+        plan = ExecutionPlan(
+            goal="open chrome, open bilibili, and find videos about llm",
+            steps=[],
+            task_type="guided_ui_task",
+            status="ready",
+        )
+        reasoning = {"confidence": 0.96, "requires_confirmation": False}
+        action_step = PlanStep(
+            "type_text",
+            {
+                "target_id": "n017",
+                "target": "Search or type URL",
+                "text": "bilibili llm",
+                "press_enter": True,
+            },
+        )
+
+        with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": ""}):
+            executor._remember_verified_shortcut(
+                plan=plan,
+                reasoning=reasoning,
+                action_step=action_step,
+                action_result={"success": True},
+                page_before_action="messages_search",
+                app_before_action="com.android.chrome",
+            )
+        self.assertIsNone(
+            memory.find_interaction_pattern(
+                task_type="guided_ui_task",
+                app="com.android.chrome",
+                page="messages_search",
+                goal="open chrome, open bilibili, and find videos about llm",
+                screen_summary=screen_summary,
+                recent_actions=state.recent_actions,
+            )
+        )
+
+        with mock.patch.dict("os.environ", {"AGENT_ENABLE_GUIDED_UI_MEMORY_EXPANSION": "1"}):
+            executor._remember_verified_shortcut(
+                plan=plan,
+                reasoning=reasoning,
+                action_step=action_step,
+                action_result={"success": True},
+                page_before_action="messages_search",
+                app_before_action="com.android.chrome",
+            )
+
+        pattern = memory.find_interaction_pattern(
+            task_type="guided_ui_task",
+            app="com.android.chrome",
+            page="messages_search",
+            goal="open chrome, open bilibili, and find videos about llm",
+            screen_summary=screen_summary,
+            recent_actions=state.recent_actions,
+        )
+        self.assertIsNotNone(pattern)
+        self.assertEqual(pattern["skill"], "type_text")
+        self.assertEqual(pattern["args"]["text"], "bilibili llm")
 
     def test_guided_ui_task_rejects_invalid_interactive_action(self):
         class InvalidReasoner(object):

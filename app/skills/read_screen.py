@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Dict, Mapping, Optional
 
 from app.affordances import build_affordance_graph
@@ -30,6 +31,7 @@ def _build_candidate(node: ET.Element) -> Optional[Dict[str, Any]]:
     text_value = (node.attrib.get("text") or "").strip()
     content_desc = (node.attrib.get("content-desc") or "").strip()
     resource_id = (node.attrib.get("resource-id") or "").strip()
+    hint = (node.attrib.get("hint") or "").strip()
     label = text_value or content_desc or resource_id
     if not label:
         return None
@@ -50,6 +52,10 @@ def _build_candidate(node: ET.Element) -> Optional[Dict[str, Any]]:
         "content_desc": content_desc,
         "class_name": node.attrib.get("class", ""),
         "clickable": node.attrib.get("clickable", "false") == "true",
+        "focusable": node.attrib.get("focusable", "false") == "true",
+        "focused": node.attrib.get("focused", "false") == "true",
+        "enabled": node.attrib.get("enabled", "true") == "true",
+        "hint": hint,
         "confidence": confidence,
         "source": source,
     }
@@ -81,6 +87,77 @@ def detect_page_name(
     return best_name
 
 
+def _first_package(root: ET.Element) -> str:
+    for node in root.iter("node"):
+        package_name = (node.attrib.get("package") or "").strip()
+        if package_name:
+            return package_name
+    return ""
+
+
+def _normalize_url(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if " " in value or "." not in value:
+        return ""
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", value):
+        value = "https://{0}".format(value)
+    parsed = urlparse(value)
+    if not parsed.netloc:
+        return ""
+    return parsed.geturl()
+
+
+def _extract_browser_url(root: ET.Element) -> str:
+    for node in root.iter("node"):
+        resource_id = (node.attrib.get("resource-id") or "").strip()
+        if resource_id != "com.android.chrome:id/url_bar":
+            continue
+        url = _normalize_url(node.attrib.get("text") or "")
+        if url:
+            return url
+    return ""
+
+
+def _domain_from_url(url: str) -> str:
+    if not url:
+        return ""
+    return urlparse(url).netloc.lower()
+
+
+def _package_from_focus(focus: str) -> str:
+    match = re.search(r"\s(u\d+\s+)?([A-Za-z0-9_.]+)/", focus or "")
+    if match:
+        return match.group(2)
+    return ""
+
+
+def _detect_browser_page(
+    visible_text,
+    possible_targets,
+    current_package: str,
+    current_url: str,
+) -> Optional[str]:
+    if current_package != "com.android.chrome":
+        return None
+    domain = _domain_from_url(current_url)
+    url_lower = current_url.lower()
+    if "/search" in url_lower and ("keyword=" in url_lower or "q=" in url_lower):
+        if "bilibili" in domain:
+            return "bilibili_search_results"
+        return "browser_site_search_results"
+    if domain:
+        if "bilibili" in domain:
+            return "bilibili_site"
+        return "browser_site"
+    corpus = normalize_text(" ".join(str(item or "") for item in visible_text))
+    if any("url_bar" in str((target or {}).get("resource_id") or "").lower() for target in possible_targets):
+        if "search google or type url" in corpus or "trending searches" in corpus:
+            return "browser_search"
+    return "browser_page"
+
+
 def read_screen_summary(
     adb,
     xml_path: str,
@@ -89,6 +166,9 @@ def read_screen_summary(
     dump_path = adb.dump_ui_xml(xml_path)
     tree = ET.parse(str(dump_path))
     root = tree.getroot()
+    current_package = _first_package(root)
+    current_url = _extract_browser_url(root)
+    current_domain = _domain_from_url(current_url)
 
     visible_text = []
     possible_targets = []
@@ -101,14 +181,18 @@ def read_screen_summary(
         possible_targets.append(candidate)
 
     focus = adb.get_current_focus()
-    app_name = "unknown"
-    if "/" in focus:
-        app_name = focus.split()[0].split("/")[-1]
+    app_name = current_package or "unknown"
+    if app_name == "unknown" and "/" in focus:
+        app_name = _package_from_focus(focus) or app_name
 
+    browser_page = _detect_browser_page(visible_text, possible_targets, current_package, current_url)
     detected_page = detect_page_name(visible_text, focus, runtime_config)
     summary = {
         "app": app_name,
-        "page": detected_page or Path(str(dump_path)).stem,
+        "current_package": current_package,
+        "current_url": current_url,
+        "current_domain": current_domain,
+        "page": browser_page or detected_page or Path(str(dump_path)).stem,
         "visible_text": visible_text[:50],
         "possible_targets": possible_targets[:50],
         "focus": focus,
