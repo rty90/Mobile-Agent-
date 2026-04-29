@@ -16,9 +16,15 @@ CHROME_BILIBILI_SEARCH_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 class ReadScreenADB(object):
-    def __init__(self, xml_text, focus="mCurrentFocus=Window{123 u0 com.android.chrome/.Main}"):
+    def __init__(
+        self,
+        xml_text,
+        focus="mCurrentFocus=Window{123 u0 com.android.chrome/.Main}",
+        shell_outputs=None,
+    ):
         self.xml_text = xml_text
         self.focus = focus
+        self.shell_outputs = shell_outputs or {}
 
     def dump_ui_xml(self, local_path):
         path = Path(local_path)
@@ -28,6 +34,9 @@ class ReadScreenADB(object):
 
     def get_current_focus(self):
         return self.focus
+
+    def shell(self, command, check=True, timeout=None):
+        return self.shell_outputs.get(command, "")
 
 
 class ReadScreenTests(unittest.TestCase):
@@ -106,6 +115,32 @@ class ReadScreenTests(unittest.TestCase):
         self.assertEqual(summary["current_domain"], "m.bilibili.com")
         self.assertEqual(summary["page"], "bilibili_search_results")
         self.assertIn("keyword=Llm", summary["current_url"])
+
+    def test_read_screen_attaches_system_overlay_probe_result(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy>
+  <node text="" resource-id="" package="com.android.chrome" clickable="false" bounds="[0,0][1280,2856]" class="android.widget.FrameLayout" />
+  <node text="Search Google or type URL" resource-id="com.android.chrome:id/url_bar" package="com.android.chrome" clickable="true" focusable="true" focused="true" bounds="[48,156][1000,324]" class="android.widget.EditText" />
+</hierarchy>
+"""
+        summary = read_screen_summary(
+            ReadScreenADB(
+                xml,
+                shell_outputs={
+                    "dumpsys window": "Window #7 Window{abc u0 InputMethod}\nmImeShowing=true",
+                    "dumpsys input_method": (
+                        "isStylusHandwritingEnabled=true\n"
+                        "privateImeOptions=restrictDirectWritingArea=true"
+                    ),
+                },
+            ),
+            "tmp/test_dbs/chrome_overlay.xml",
+            runtime_config=build_demo_message_config(),
+        )
+
+        self.assertTrue(summary["system_overlay"]["present"])
+        self.assertTrue(summary["system_overlay"]["blocks_input"])
+        self.assertEqual(summary["system_overlay"]["type"], "handwriting_input_method")
 
 
 if __name__ == "__main__":

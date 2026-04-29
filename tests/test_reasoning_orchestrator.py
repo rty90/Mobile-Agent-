@@ -586,6 +586,15 @@ class ReasoningOrchestratorTests(unittest.TestCase):
             screen_summary={
                 "page": "messages_search",
                 "visible_text": ["Search or type URL"],
+                "affordance_graph": {
+                    "actions": [
+                        {
+                            "action_id": "type:n017",
+                            "skill": "type_text",
+                            "args": {"target_id": "n017", "target": "Search or type URL"},
+                        }
+                    ]
+                },
                 "possible_targets": [
                     {
                         "label": "Search or type URL",
@@ -609,17 +618,17 @@ class ReasoningOrchestratorTests(unittest.TestCase):
         self.assertEqual(calls["local"], 0)
         self.assertEqual(calls["cloud"], 0)
 
-    def test_stylus_overlay_prefers_back_before_input(self):
+    def test_stylus_overlay_on_focused_search_continues_search_intent(self):
         orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
         calls = {"local": 0, "cloud": 0}
 
         def fail_local(**kwargs):
             calls["local"] += 1
-            raise AssertionError("no model call needed when a blocker overlay is already visible")
+            raise AssertionError("no model call needed when a focused search input is already available")
 
         def fail_cloud(**kwargs):
             calls["cloud"] += 1
-            raise AssertionError("no cloud call needed when a blocker overlay is already visible")
+            raise AssertionError("no cloud call needed when a focused search input is already available")
 
         orchestrator._call_openai_compatible_text = fail_local
         orchestrator._call_openai_compatible_review = fail_cloud
@@ -655,7 +664,98 @@ class ReasoningOrchestratorTests(unittest.TestCase):
         )
 
         self.assertEqual(result["decision"].selected_backend, "rule")
-        self.assertEqual(result["decision"].skill, "back")
+        self.assertEqual(result["decision"].skill, "search_in_app")
+        self.assertEqual(result["decision"].args["query"], "bilibili llm")
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_permission_blocker_prefers_allow_before_model_calls(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed when a permission blocker is visible")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed when a permission blocker is visible")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open gmail and create a new email draft",
+            task_type="guided_ui_task",
+            screen_summary={
+                "app": "com.android.permissioncontroller",
+                "page": "message_thread",
+                "visible_text": ["Allow Gmail to send you notifications?", "Allow", "Don\u2019t allow"],
+                "possible_targets": [
+                    {
+                        "label": "Allow",
+                        "class_name": "android.widget.Button",
+                        "clickable": True,
+                        "target_id": "n002",
+                    },
+                    {
+                        "label": "Don\u2019t allow",
+                        "class_name": "android.widget.Button",
+                        "clickable": True,
+                        "target_id": "n003",
+                    },
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertEqual(result["decision"].skill, "tap")
+        self.assertEqual(result["decision"].args["target_id"], "n002")
+        self.assertEqual(calls["local"], 0)
+        self.assertEqual(calls["cloud"], 0)
+
+    def test_gmail_compose_progress_stops_before_send(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+        calls = {"local": 0, "cloud": 0}
+
+        def fail_local(**kwargs):
+            calls["local"] += 1
+            raise AssertionError("no model call needed when Gmail draft is already open")
+
+        def fail_cloud(**kwargs):
+            calls["cloud"] += 1
+            raise AssertionError("no cloud call needed when Gmail draft is already open")
+
+        orchestrator._call_openai_compatible_text = fail_local
+        orchestrator._call_openai_compatible_review = fail_cloud
+
+        result = orchestrator.resolve(
+            goal="open gmail and create a new email draft",
+            task_type="guided_ui_task",
+            screen_summary={
+                "app": "com.google.android.gm",
+                "page": "message_thread",
+                "visible_text": ["Navigate up", "Attach files", "Send", "More options", "com.google.android.gm:id/compose", "From"],
+                "possible_targets": [
+                    {
+                        "label": "Send",
+                        "resource_id": "com.google.android.gm:id/send",
+                        "class_name": "android.widget.Button",
+                        "clickable": True,
+                        "target_id": "n005",
+                    }
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertEqual(result["decision"].selected_backend, "rule")
+        self.assertIsNone(result["decision"].skill)
         self.assertEqual(calls["local"], 0)
         self.assertEqual(calls["cloud"], 0)
 
@@ -732,6 +832,76 @@ class ReasoningOrchestratorTests(unittest.TestCase):
         self.assertIsNone(result["decision"].skill)
         self.assertEqual(calls["local"], 0)
         self.assertEqual(calls["cloud"], 0)
+
+    def test_browser_site_search_page_without_query_does_not_mark_goal_complete(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+
+        result = orchestrator.resolve(
+            goal="open chrome and open bilibili website search llm",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "bilibili_site",
+                "app": "com.android.chrome",
+                "current_package": "com.android.chrome",
+                "current_domain": "m.bilibili.com",
+                "current_url": "https://m.bilibili.com/search",
+                "visible_text": ["搜索-哔哩哔哩_Bilibili", "大家都在搜", "取消"],
+                "possible_targets": [
+                    {
+                        "label": "m.bilibili.com/search",
+                        "resource_id": "com.android.chrome:id/url_bar",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "focused": False,
+                        "target_id": "n026",
+                    }
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertNotEqual(result["decision"].reason_summary, "The requested guided UI task is already complete on the current page.")
+        self.assertIsNotNone(result["decision"].skill)
+
+    def test_chrome_omnibox_suggestions_do_not_mark_site_search_goal_complete(self):
+        orchestrator, _trace_path = self._build_orchestrator(cloud_configured=True)
+
+        result = orchestrator.resolve(
+            goal="open chrome, open bilibili, and find videos about llm",
+            task_type="guided_ui_task",
+            screen_summary={
+                "page": "browser_page",
+                "app": "com.android.chrome",
+                "current_package": "com.android.chrome",
+                "current_domain": "",
+                "current_url": "",
+                "visible_text": [
+                    "llm",
+                    "com.android.chrome:id/omnibox_results_container",
+                    "15 suggested items in list below.",
+                    "llm meaning",
+                    "llm arena",
+                ],
+                "possible_targets": [
+                    {
+                        "label": "llm",
+                        "resource_id": "com.android.chrome:id/url_bar",
+                        "class_name": "android.widget.EditText",
+                        "clickable": True,
+                        "focused": True,
+                        "target_id": "n006",
+                    }
+                ],
+            },
+            screenshot_path=None,
+            recent_actions=[],
+            relevant_memories=[],
+        )
+
+        self.assertNotEqual(result["decision"].reason_summary, "The requested guided UI task is already complete on the current page.")
+        self.assertIsNotNone(result["decision"].skill)
 
     def test_interaction_pattern_is_disabled_for_guided_ui_tasks(self):
         orchestrator, _trace_path = self._build_orchestrator(cloud_configured=False)

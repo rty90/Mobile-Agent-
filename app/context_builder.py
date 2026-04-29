@@ -19,6 +19,7 @@ from app.task_types import (
     parse_extract_task,
     parse_screen_read_task,
 )
+from app.ui_state import normalize_ui_state
 
 
 class ContextBuilder(object):
@@ -172,6 +173,12 @@ class ContextBuilder(object):
             "relevant_memories": self._build_memories(resolved_task_type, goal, current_app),
             "ui_shortcut": self._build_ui_shortcut(goal, state, resolved_task_type),
             "interaction_pattern": self._build_interaction_pattern(goal, state, resolved_task_type),
+            "ui_state": normalize_ui_state(
+                goal=goal,
+                task_type=resolved_task_type,
+                screen_summary=state.screen_summary or {},
+                recent_actions=state.recent_actions,
+            ),
             "risk_flag": state.risk_flag,
         }
 
@@ -230,6 +237,7 @@ class ContextBuilder(object):
             "relevant_memories": context.get("relevant_memories", []),
             "ui_shortcut": context.get("ui_shortcut"),
             "interaction_pattern": context.get("interaction_pattern"),
+            "ui_state": context.get("ui_state", {}),
             "risk_flag": context.get("risk_flag", False),
             "known_contact": context.get("known_contact"),
             "target_app_hint": context.get("target_app_hint"),

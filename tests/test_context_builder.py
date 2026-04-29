@@ -169,6 +169,7 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertEqual(context["target_app_hint"], "keep")
         self.assertEqual(len(context["relevant_memories"]), 0)
         self.assertEqual(context["ui_shortcut"]["skill"], "tap")
+        self.assertIn("goal_progress", context["ui_state"])
 
     def test_context_builder_reenables_guided_ui_memories_when_opted_in(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -347,6 +348,28 @@ class ContextBuilderTests(unittest.TestCase):
 
         self.assertIsNotNone(context["interaction_pattern"])
         self.assertEqual(context["interaction_pattern"]["skill"], "type_text")
+
+    def test_context_builder_includes_ui_state_blocker_and_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemory(db_path=str(Path(temp_dir) / "memory.db"))
+            state = AgentState(
+                current_app="com.android.chrome",
+                screen_summary={
+                    "app": "com.android.chrome",
+                    "page": "browser_search",
+                    "visible_text": ["Search or type URL", "Try out your stylus", "Write here", "Cancel", "Next"],
+                    "possible_targets": [],
+                },
+            )
+            builder = ContextBuilder(memory=memory)
+            context = builder.build(
+                "open chrome and search for llm",
+                state=state,
+                task_type="guided_ui_task",
+            )
+
+        self.assertEqual(context["ui_state"]["primary_blocker"]["type"], "input_blocking_overlay")
+        self.assertEqual(context["ui_state"]["goal_progress"]["stage"], "clear_blocker")
 
 
 if __name__ == "__main__":

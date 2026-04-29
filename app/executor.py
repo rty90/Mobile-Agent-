@@ -4,6 +4,7 @@ from typing import Any, Dict, Mapping, Optional
 
 from app.memory import SQLiteMemory
 from app.planner import ExecutionPlan, PlanStep
+from app.progress_verifier import build_action_guard, detect_repeated_no_progress
 from app.skills.base import SkillContext
 from app.skills.read_screen import read_screen_summary
 from app.skills.targeting import find_semantic_target
@@ -280,6 +281,20 @@ class Executor(object):
         target_name = step.args.get("target") or step.args.get("expect_target")
         if isinstance(data.get("screen_summary"), dict):
             page_name = data["screen_summary"].get("page", page_name)
+        if (
+            result.get("success")
+            and self.state.task_type == TASK_GUIDED_UI_TASK
+            and step.skill in ("tap", "type_text", "search_in_app", "back")
+            and isinstance(data.get("screen_summary"), dict)
+        ):
+            data["action_guard"] = build_action_guard(
+                goal=self.state.current_task or "",
+                task_type=self.state.task_type or "",
+                skill=step.skill,
+                args=dict(step.args or {}),
+                screen_summary=data["screen_summary"],
+                recent_actions=self.state.recent_actions,
+            )
 
         self.state.record_step(
             action=step.skill,
@@ -363,6 +378,13 @@ class Executor(object):
     ) -> Optional[str]:
         if self.state.task_type != TASK_GUIDED_UI_TASK:
             return None
+        repeated_no_progress = detect_repeated_no_progress(
+            goal=self.state.current_task or "",
+            task_type=self.state.task_type or "",
+            recent_actions=self.state.recent_actions,
+        )
+        if repeated_no_progress:
+            return repeated_no_progress
         if step.skill not in ("tap", "read_screen", "reason_about_page"):
             return None
         recent = self.state.recent_actions[-6:]

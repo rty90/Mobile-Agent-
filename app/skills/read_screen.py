@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, Optional
 
 from app.affordances import build_affordance_graph
 from app.demo_config import DemoMessageConfig
+from app.overlay_detector import detect_system_overlay
 from app.skills.base import BaseSkill, SkillContext
 from app.skills.targeting import normalize_text
 
@@ -158,6 +159,50 @@ def _detect_browser_page(
     return "browser_page"
 
 
+def _should_probe_system_overlay(summary: Dict[str, Any]) -> bool:
+    for candidate in summary.get("possible_targets", []):
+        if not isinstance(candidate, dict):
+            continue
+        class_name = normalize_text(candidate.get("class_name") or "")
+        if "edittext" not in class_name:
+            continue
+        if candidate.get("focused"):
+            return True
+        combined = normalize_text(
+            " ".join(
+                str(candidate.get(key) or "")
+                for key in ("label", "resource_id", "content_desc", "hint")
+            )
+        )
+        if any(marker in combined for marker in ("search", "url", "query", "address")):
+            return True
+    return False
+
+
+def _read_system_overlay(adb, summary: Dict[str, Any]) -> Dict[str, Any]:
+    if not _should_probe_system_overlay(summary):
+        return detect_system_overlay(summary)
+    if not hasattr(adb, "shell"):
+        return detect_system_overlay(summary)
+    try:
+        window_dump = adb.shell("dumpsys window", check=False, timeout=3)
+    except Exception as exc:
+        return {
+            "present": False,
+            "scope": "system",
+            "type": "probe_failed",
+            "blocks_input": False,
+            "confidence": 0.0,
+            "recommended_recovery": "none",
+            "evidence": ["dumpsys window failed: {0}".format(type(exc).__name__)],
+        }
+    try:
+        input_method_dump = adb.shell("dumpsys input_method", check=False, timeout=3)
+    except Exception:
+        input_method_dump = ""
+    return detect_system_overlay(summary, window_dump=window_dump, input_method_dump=input_method_dump)
+
+
 def read_screen_summary(
     adb,
     xml_path: str,
@@ -198,6 +243,7 @@ def read_screen_summary(
         "focus": focus,
         "ui_dump_path": str(dump_path),
     }
+    summary["system_overlay"] = _read_system_overlay(adb, summary)
     summary["affordance_graph"] = build_affordance_graph(summary)
     return summary
 

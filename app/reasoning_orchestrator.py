@@ -14,6 +14,7 @@ from app.schemas.reasoning_decision import ReasoningDecision
 from app.trace_bus import TraceBus
 from app.learning_flags import guided_ui_memory_expansion_enabled
 from app.task_types import TASK_GUIDED_UI_TASK, extract_message_body
+from app.ui_state import normalize_ui_state
 
 
 class ReasoningOrchestrator(object):
@@ -94,12 +95,21 @@ class ReasoningOrchestrator(object):
             "forbidden_top_level_keys",
             ["action", "target", "resource_id", "bounds", "step", "explanation"],
         )
+        context_payload.setdefault(
+            "ui_state",
+            normalize_ui_state(
+                goal=goal,
+                task_type=task_type,
+                screen_summary=screen_summary,
+                recent_actions=recent_actions,
+            ),
+        )
 
         editor_type_decision = self._guided_keep_editor_type_decision(goal, task_type, screen_summary)
         if editor_type_decision:
             return self._finish(editor_type_decision, screen_summary)
 
-        if self._guided_goal_already_complete(goal, task_type, screen_summary):
+        if self._guided_goal_already_complete(goal, task_type, screen_summary, context_payload):
             decision = ReasoningDecision(
                 decision="execute",
                 task_type=task_type,
@@ -113,6 +123,29 @@ class ReasoningOrchestrator(object):
                 fallback_used=True,
             )
             return self._finish(decision, screen_summary)
+
+        blocker_decision = self._guided_blocker_decision(goal, task_type, context_payload)
+        if blocker_decision:
+            return self._finish(blocker_decision, screen_summary)
+
+        if guided_ui_memory_expansion_enabled():
+            pattern_result = self._resolve_interaction_pattern(
+                goal=goal,
+                task_type=task_type,
+                context_payload=context_payload,
+            )
+            if self._is_resolved(pattern_result["decision"], goal, task_type):
+                return self._finish(pattern_result["decision"], screen_summary)
+
+        guided_input_decision = self._guided_interaction_pattern_decision(
+            goal=goal,
+            task_type=task_type,
+            context_payload=context_payload,
+            screen_summary=screen_summary,
+            recent_actions=recent_actions,
+        )
+        if guided_input_decision:
+            return self._finish(guided_input_decision, screen_summary)
 
         if self._should_use_model_first_action(task_type, context_payload):
             cloud_result = self._resolve_cloud_review(goal, task_type, context_payload, screenshot_path)
@@ -134,16 +167,6 @@ class ReasoningOrchestrator(object):
         )
         if self._is_resolved(pattern_result["decision"], goal, task_type):
             return self._finish(pattern_result["decision"], screen_summary)
-
-        interaction_pattern_decision = self._guided_interaction_pattern_decision(
-            goal=goal,
-            task_type=task_type,
-            context_payload=context_payload,
-            screen_summary=screen_summary,
-            recent_actions=recent_actions,
-        )
-        if interaction_pattern_decision:
-            return self._finish(interaction_pattern_decision, screen_summary)
 
         if self._should_use_cloud_first(goal, task_type):
             cloud_result = self._resolve_cloud_review(goal, task_type, context_payload, screenshot_path)
@@ -778,8 +801,17 @@ class ReasoningOrchestrator(object):
         goal: str,
         task_type: str,
         screen_summary: Dict[str, Any],
+        context_payload: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if task_type != TASK_GUIDED_UI_TASK:
+            return False
+        ui_state = (context_payload or {}).get("ui_state") if isinstance(context_payload, dict) else {}
+        progress = ui_state.get("goal_progress") if isinstance(ui_state, dict) else {}
+        if isinstance(progress, dict) and bool(progress.get("done")):
+            return True
+        if isinstance(progress, dict) and ReasoningOrchestrator._goal_looks_search(goal):
+            # The normalized UI state has the stricter search completion check:
+            # reaching a site search page is not enough unless the requested query is present.
             return False
         normalized = (goal or "").strip().lower()
         page = str((screen_summary or {}).get("page") or "").strip().lower()
@@ -815,6 +847,43 @@ class ReasoningOrchestrator(object):
         ):
             return True
         return False
+
+    @staticmethod
+    def _guided_blocker_decision(
+        goal: str,
+        task_type: str,
+        context_payload: Dict[str, Any],
+    ) -> Optional[ReasoningDecision]:
+        if task_type != TASK_GUIDED_UI_TASK:
+            return None
+        if ReasoningOrchestrator._is_read_only_guided_request(goal):
+            return None
+        ui_state = context_payload.get("ui_state")
+        if not isinstance(ui_state, dict):
+            return None
+        blocker = ui_state.get("primary_blocker")
+        if not isinstance(blocker, dict):
+            return None
+        action = blocker.get("suggested_action")
+        if not isinstance(action, dict):
+            return None
+        skill = str(action.get("skill") or "").strip()
+        if skill not in {"tap", "back"}:
+            return None
+        args = action.get("args") if isinstance(action.get("args"), dict) else {}
+        blocker_type = str(blocker.get("type") or "blocker").strip()
+        return ReasoningDecision(
+            decision="execute",
+            task_type=task_type,
+            skill=skill,
+            args=dict(args),
+            confidence=0.93,
+            requires_confirmation=False,
+            reason_summary="Clear blocking UI first: {0}.".format(blocker_type),
+            validation_errors=[],
+            selected_backend="rule",
+            fallback_used=True,
+        )
 
     @staticmethod
     def _guided_keep_editor_type_decision(
@@ -1029,19 +1098,6 @@ class ReasoningOrchestrator(object):
             text = cls._extract_search_query(goal)
             if not text:
                 return None
-            if cls._has_input_blocker_overlay(screen_summary):
-                return ReasoningDecision(
-                    decision="execute",
-                    task_type=task_type,
-                    skill="back",
-                    args={},
-                    confidence=0.90,
-                    requires_confirmation=False,
-                    reason_summary="An input-blocking overlay is visible; dismiss it before searching.",
-                    validation_errors=[],
-                    selected_backend="rule",
-                    fallback_used=True,
-                )
             if cls._looks_like_browser_search_surface(screen_summary, input_target):
                 return ReasoningDecision(
                     decision="execute",
